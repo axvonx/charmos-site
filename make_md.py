@@ -5,8 +5,8 @@ import re, shutil
 from pathlib import Path
 from collections import defaultdict
 
-SOURCE_REPO_URL = "https://github.com/bluegummi/charmos/blob/main"
-BUG_URL_BASE = "https://github.com/bluegummi/charmos/issues"
+SOURCE_REPO_URL = "https://github.com/axvonx/charmos/blob/main"
+BUG_URL_BASE = "https://github.com/axvonx/charmos/issues"
 DOCS_ROOT = Path("./docs")
 
 IGNORED_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof"}
@@ -499,7 +499,7 @@ def link_commits_in_md(md_text: str):
     COMMIT_RE = re.compile(r'commit\s+([0-9a-f]{7,40})', re.IGNORECASE)
     def replacer(match):
         h = match.group(1)
-        url = f"https://github.com/bluegummi/charmos/commit/{h}"
+        url = f"https://github.com/axvonx/charmos/commit/{h}"
         return f"[commit {h}]({url})"
     return COMMIT_RE.sub(replacer, md_text)
 

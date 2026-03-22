@@ -17,7 +17,7 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-REPO_URL   = "https://github.com/bluegummi/charmos.git"
+REPO_URL   = "https://github.com/axvonx/charmos.git"
 CLONE_DIR  = Path("./charmos")
 JSON_OUT   = Path("./json_output")
 MD_OUT     = Path("./docs")

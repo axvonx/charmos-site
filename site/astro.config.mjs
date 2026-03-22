@@ -28,7 +28,7 @@ export default defineConfig({
         {
           icon: "github",
           label: "GitHub",
-          href: "https://github.com/bluegummi/charmos",
+          href: "https://github.com/axvonx/charmos",
         },
       ],
       sidebar: [

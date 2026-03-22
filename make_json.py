@@ -447,6 +447,23 @@ def parse_c_types_and_functions(filename):
                 }
             )
 
+        elif node.type == "declaration":
+            decl = node.child_by_field_name("declarator")
+            type_node = node.child_by_field_name("type")
+
+            if decl and is_function_prototype(decl):
+                name, params = extract_function_name_and_params(decl, code)
+                ret_type = get_full_return_type(type_node, decl, code)
+
+                functions.append(
+                    {
+                        "name": name,
+                        "return_type": ret_type,
+                        "parameters": params,
+                        "line": node.start_point[0] + 1,
+                    }
+                )
+
         elif node.type in ("struct_specifier", "union_specifier"):
             # Only record if it has a body (i.e. is a definition, not a reference)
             body = node.child_by_field_name("body")
