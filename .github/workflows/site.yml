@@ -41,7 +41,7 @@ jobs:
 
       - name: Generate
         run: |
-          pip install tree_sitter tree_sitter_language_pack --break-system-packages
+          pip install -r requirements.txt --break-system-packages
           python3 generate.py
           cd site
           npm i starlight-theme-obsidian
