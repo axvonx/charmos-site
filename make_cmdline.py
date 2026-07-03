@@ -179,13 +179,8 @@ def render_mdx(entries: list[dict]) -> str:
         'description: "Boot-time kernel parameters parsed from the bootloader ' 'command line."',
         "---",
         "",
-        "The charmOS kernel reads boot parameters from the bootloader command "
-        "line (`key=value`, space-separated). Options are declared in-source "
-        f"with `{MACRO}`, and **this page is generated from those "
-        "declarations** — so it always matches the kernel you are running.",
-        "",
         "## Options",
-        "",
+        "TODO",
     ]
     if entries:
         lines += [
@@ -198,12 +193,7 @@ def render_mdx(entries: list[dict]) -> str:
     lines += [
         "",
         "## Listing options at runtime",
-        "",
-        "Pass `help` on the kernel command line to have the kernel print every "
-        "registered option — with its default and description — and halt. That "
-        "dump is produced by walking the same declarations this page is built "
-        "from, so the two never drift apart.",
-        "",
+        "TODO",
     ]
     return "\n".join(lines)
 

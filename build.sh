@@ -5,6 +5,8 @@
 #   ./build.sh              incremental — regenerate docs + build the site
 #   ./build.sh --rebuild    clean rebuild — wipe every generated artifact first
 #                           (use this when you're unsure you're seeing the latest)
+#   ./build.sh --reclone    also delete the cloned charmos/ + limine/ sources so
+#                           generate.py fetches them fresh (implies --rebuild)
 #   ./build.sh --serve      after building, serve a local preview
 #   ./build.sh --rebuild --serve
 #
@@ -16,10 +18,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 REBUILD=0
+RECLONE=0
 SERVE=0
 for arg in "$@"; do
   case "$arg" in
     --rebuild|-r) REBUILD=1 ;;
+    --reclone|-c) RECLONE=1; REBUILD=1 ;;  # re-fetching sources implies a clean rebuild
     --serve|-s)   SERVE=1 ;;
     -h|--help)
       grep '^#' "$0" | sed '1d;s/^#\s\{0,1\}//'
@@ -27,6 +31,11 @@ for arg in "$@"; do
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
+
+if [ "$RECLONE" = 1 ]; then
+  echo "==> re-clone: removing cloned sources (charmos/, limine/)"
+  rm -rf charmos limine
+fi
 
 if [ "$REBUILD" = 1 ]; then
   echo "==> clean rebuild: wiping generated artifacts"

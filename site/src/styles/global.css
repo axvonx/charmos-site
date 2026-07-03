@@ -1,15 +1,20 @@
+/* Evergreen accent, keyed to the charmOS logo (a green clover-atom, #008000 /
+   hsl(120, 100%, 25%)). Hue is nudged to ~140 for a richer spruce green than
+   the logo's pure web-green; this replaces starlight-theme-obsidian's default
+   purple accent. accent-high is the lightest step, accent-low the darkest —
+   swapped between themes for readable contrast on either background. */
 :root {
-  --sl-color-accent-high: hsl(258, 79%, 72%);
-  --sl-color-accent: hsl(258, 61%, 66%);
-  --sl-color-accent-low: hsl(258, 55%, 57%);
-  --sl-hero-color: hsla(258, 61%, 66%, 30%);
+  --sl-color-accent-high: hsl(140, 60%, 62%);
+  --sl-color-accent: hsl(142, 55%, 48%);
+  --sl-color-accent-low: hsl(145, 50%, 34%);
+  --sl-hero-color: hsla(140, 55%, 45%, 30%);
 }
 
 :root[data-theme="light"] {
-  --sl-color-accent-high: hsl(257, 49%, 42%);
-  --sl-color-accent: hsl(257, 54%, 59%);
-  --sl-color-accent-low: hsl(257, 52%, 75%);
-  --sl-hero-color: hsla(257, 70%, 70%, 25%);
+  --sl-color-accent-high: hsl(146, 65%, 26%);
+  --sl-color-accent: hsl(143, 52%, 38%);
+  --sl-color-accent-low: hsl(140, 42%, 72%);
+  --sl-hero-color: hsla(142, 55%, 45%, 25%);
 }
 
 .hero {
@@ -47,23 +52,23 @@
     --sl-border-radius-md: 8px;
     --sl-border-radius-lg: 12px;
 
-    /* Ambient purple glow */
-    --glow-purple-strong: hsla(258, 70%, 40%, 0.25);
-    --glow-purple-soft: hsla(258, 70%, 40%, 0.12);
+    /* Ambient evergreen glow */
+    --glow-accent-strong: hsla(140, 65%, 35%, 0.25);
+    --glow-accent-soft: hsla(140, 65%, 35%, 0.12);
   }
 
   :root[data-theme="dark"] {
     --sl-color-bg: #111213;
 
-    --glow-purple-strong: hsla(258, 70%, 30%, 0.22);
-    --glow-purple-soft: hsla(258, 70%, 30%, 0.1);
+    --glow-accent-strong: hsla(140, 65%, 26%, 0.22);
+    --glow-accent-soft: hsla(140, 65%, 26%, 0.1);
   }
 
   :root[data-theme="light"] {
     --sl-color-bg: #f8f9fa;
 
-    --glow-purple-strong: hsla(257, 54%, 40%, 0.2);
-    --glow-purple-soft: hsla(257, 54%, 40%, 0.08);
+    --glow-accent-strong: hsla(142, 55%, 40%, 0.2);
+    --glow-accent-soft: hsla(142, 55%, 40%, 0.08);
   }
   @media (min-width: 800px) {
     /* Outer sidebar shape */
@@ -100,7 +105,7 @@
     }
   }
   /* --------------------------------------------
-       Full-page background with purple glow
+       Full-page background with evergreen glow
        -------------------------------------------- */
   body,
   .page {
@@ -110,7 +115,7 @@
     /* single soft circular glow */
     background-image: radial-gradient(
       circle at center,
-      var(--glow-purple-strong),
+      var(--glow-accent-strong),
       transparent 100%
     );
     background-repeat: no-repeat;
