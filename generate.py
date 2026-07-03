@@ -542,43 +542,23 @@ def copy_directory_indexes():
     t0 = begin_step("Copy directory index files", f"{len(indexes)} found")
     bar = ProgressBar(len(indexes), "copying")
 
+    # Route each landing page into the SAME label-named directory make_md writes
+    # its pages to (so an index.mdx and its siblings never split across the
+    # original and renamed dir). make_md owns the label map.
+    from make_md import build_dir_label_map, dir_label_path
+
+    label_map = build_dir_label_map(src_root)
+
     for index_file in indexes:
-        dest = docs_root / index_file.relative_to(src_root)
+        rel = index_file.relative_to(src_root)
+        label_dir = dir_label_path(rel.parent, label_map)
+        dest = (docs_root / label_dir / rel.name) if label_dir else (docs_root / rel.name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(index_file, dest)
         bar.advance()
 
     bar.finish()
     end_step(t0)
-
-
-def rename_directories_from_namefiles():
-    src_root = Path("charmos/include")
-    docs_root = Path("docs")
-
-    t0 = begin_step("Rename directories from name-files")
-    renamed = 0
-
-    for src_dir in src_root.rglob("*"):
-        if not src_dir.is_dir():
-            continue
-        name_file = src_dir / "dir_doc_name"
-        if not name_file.is_file():
-            continue
-        new_name = name_file.read_text(encoding="utf-8").strip()
-        if not new_name:
-            continue
-
-        docs_equiv = docs_root / src_dir.relative_to(src_root)
-        new_docs_path = docs_equiv.parent / new_name
-
-        if not docs_equiv.exists() or docs_equiv.name == new_name or new_docs_path.exists():
-            continue
-
-        docs_equiv.rename(new_docs_path)
-        renamed += 1
-
-    end_step(t0, f"{renamed} director{'ies' if renamed != 1 else 'y'} renamed")
 
 
 def run_make_cmdline():
@@ -684,7 +664,6 @@ def main():
     run_make_json()
     run_make_md()
     run_make_cmdline()
-    rename_directories_from_namefiles()
     delete_empty_markdown()
     copy_directory_indexes()
     assemble_site_content()

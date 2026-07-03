@@ -32,6 +32,15 @@ from pathlib import Path
 MACRO = "CMDLINE_ENTRY_DECLARE"
 SOURCE_REPO_URL = "https://github.com/axvonx/charmos/blob/main"
 
+# The page's static prose lives in an editable MDX template rather than being
+# lumped into this file as string literals; only the generated table is filled
+# in here. Placeholders: {{MACRO}} → the declaration macro name, {{OPTIONS}} →
+# the rendered options table (or the empty-state note).
+TEMPLATE = Path(__file__).resolve().parent / "templates" / "cmdline.mdx"
+
+# Shown in place of the table when no declarations are found in the source tree.
+NO_OPTIONS_NOTE = "_No command-line options were found in the source tree._"
+
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
@@ -171,31 +180,26 @@ def render_row(e: dict) -> str:
     return f"| {name} | {value} | {default} | {required} | {desc} |"
 
 
-def render_mdx(entries: list[dict]) -> str:
+def render_options_table(entries: list[dict]) -> str:
+    """Render the Markdown options table (or the empty-state note)."""
+    if not entries:
+        return NO_OPTIONS_NOTE
     entries = sorted(entries, key=lambda e: e["name"])
-    lines = [
-        "---",
-        'title: "Command-Line Options"',
-        'description: "Boot-time kernel parameters parsed from the bootloader ' 'command line."',
-        "---",
-        "",
-        "## Options",
-        "TODO",
+    rows = [
+        "| Option | Value | Default | Required | Description |",
+        "| --- | --- | --- | --- | --- |",
+        *(render_row(e) for e in entries),
     ]
-    if entries:
-        lines += [
-            "| Option | Value | Default | Required | Description |",
-            "| --- | --- | --- | --- | --- |",
-        ]
-        lines += [render_row(e) for e in entries]
-    else:
-        lines.append("_No command-line options were found in the source tree._")
-    lines += [
-        "",
-        "## Listing options at runtime",
-        "TODO",
-    ]
-    return "\n".join(lines)
+    return "\n".join(rows)
+
+
+def render_mdx(entries: list[dict]) -> str:
+    """Fill the editable MDX template (templates/cmdline.mdx) with the generated
+    options table. All prose lives in the template; only the table is dynamic."""
+    template = TEMPLATE.read_text(encoding="utf-8")
+    return template.replace("{{MACRO}}", MACRO).replace(
+        "{{OPTIONS}}", render_options_table(entries)
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

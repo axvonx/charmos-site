@@ -42,6 +42,14 @@
   filter: drop-shadow(0 0 3rem var(--sl-hero-color));
 }
 
+/* The splash page's content footer is essentially empty (no pagination on the
+   hero), leaving just its top hairline floating under the hero — a stray thin
+   line. Drop the border there. */
+[data-has-hero] .sl-markdown-content ~ footer,
+[data-has-hero] footer.sl-flex {
+  border-top: none;
+}
+
 @layer obsidian {
   :root {
     --sl-color-bg-nav: var(--sl-color-bg);
@@ -289,6 +297,85 @@ starlight-toc a[href^="#variable-"] {
   color: var(--sl-color-white);
   border-color: var(--sl-color-accent);
   background-color: var(--sl-color-accent-low);
+}
+
+/* Homepage action cards: a large "Reference" rectangle with "Design" + "Guides"
+   as two smaller rectangles beneath it. Replaces the row of uniform hero
+   buttons. */
+.home-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 60rem;
+  margin-top: 1rem;
+}
+.home-action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+.home-action {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: var(--sl-border-radius-lg, 12px);
+  background: var(--sl-color-bg-nav, var(--sl-color-bg));
+  text-decoration: none;
+  color: var(--sl-color-white);
+  transition: border-color 0.15s, background-color 0.15s, transform 0.15s;
+}
+.home-action:hover {
+  border-color: var(--sl-color-accent);
+  background: var(--sl-color-accent-low);
+  transform: translateY(-2px);
+}
+.home-action--primary {
+  padding: 1.75rem 2rem;
+  background: linear-gradient(
+    135deg,
+    var(--sl-color-accent-low),
+    var(--sl-color-bg-nav, var(--sl-color-bg))
+  );
+  border-color: var(--sl-color-accent);
+}
+.home-action__label {
+  font-size: var(--sl-text-h4);
+  font-weight: 600;
+}
+.home-action--primary .home-action__label {
+  font-size: var(--sl-text-h2);
+}
+.home-action__desc {
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-2);
+  max-width: 42rem;
+}
+.home-action__arrow {
+  position: absolute;
+  top: 1.25rem;
+  inset-inline-end: 1.5rem;
+  font-size: 1.25rem;
+  color: var(--sl-color-accent-high);
+  transition: transform 0.15s;
+}
+.home-action:hover .home-action__arrow {
+  transform: translateX(4px);
+}
+
+@media (max-width: 30rem) {
+  .home-action-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The hero already shows "charmOS docs" prominently, so the header site-title
+   is a duplicate on the splash/landing page — hide it there. It stays on every
+   doc/blog page (which have no hero). */
+[data-has-hero] .site-title {
+  display: none;
 }
 
 /* The header social icons (GitHub/RSS) carry an extra 16px inline padding that

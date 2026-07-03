@@ -6,12 +6,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import make_md
+from docmodel import Composite, Enum, Function
 from make_md import (
     _dir_name_to_slug,
     assemble_page_text,
-    build_type_table,
     convert_blockquotes_to_asides,
     convert_h2_to_header_with_icon,
+    dir_label_path,
+    dir_slug_path,
     extract_mdx_title,
     format_enum_as_c_code,
     format_function_signature,
@@ -21,10 +24,65 @@ from make_md import (
     link_commits_in_md,
     link_files_in_md,
     link_functions_in_md,
+    linkify_code_fences,
     merge_changelog_and_notes,
     normalize_type_name,
     status_to_badge,
 )
+
+# ── linkify_code_fences ──────────────────────────────────────────────────────
+
+
+class TestLinkifyCodeFences:
+    def _with_renderer(self, fn):
+        """Temporarily install a stub _CODE_RENDERER."""
+        prev = make_md._CODE_RENDERER
+        make_md._CODE_RENDERER = fn
+        return prev
+
+    def test_noop_without_index(self):
+        prev = self._with_renderer(None)
+        try:
+            md = "text\n\n```c\nint x;\n```\n\nmore"
+            assert linkify_code_fences(md) == md
+        finally:
+            make_md._CODE_RENDERER = prev
+
+    def test_replaces_c_fence_with_rendered_block(self):
+        prev = self._with_renderer(lambda code, dn, dh: f"<SB>{code}</SB>")
+        try:
+            md = "before\n\n```c\nirql_raise(x);\n```\n\nafter"
+            out = linkify_code_fences(md)
+            assert "<SB>irql_raise(x);</SB>" in out
+            assert "```c" not in out
+            # Surrounding prose is preserved.
+            assert out.startswith("before") and out.rstrip().endswith("after")
+        finally:
+            make_md._CODE_RENDERER = prev
+
+    def test_leaves_non_c_fences_alone(self):
+        prev = self._with_renderer(lambda code, dn, dh: "<SB/>")
+        try:
+            md = "```python\nprint(1)\n```"
+            assert linkify_code_fences(md) == md
+        finally:
+            make_md._CODE_RENDERER = prev
+
+    def test_references_only_no_def_override(self):
+        # Authored snippets pass def_name/def_href as None (pure references).
+        seen = {}
+
+        def stub(code, dn, dh):
+            seen["dn"], seen["dh"] = dn, dh
+            return "<SB/>"
+
+        prev = self._with_renderer(stub)
+        try:
+            linkify_code_fences("```c\nfoo();\n```")
+            assert seen == {"dn": None, "dh": None}
+        finally:
+            make_md._CODE_RENDERER = prev
+
 
 # ── convert_blockquotes_to_asides ────────────────────────────────────────────
 
@@ -261,6 +319,55 @@ class TestAssemblePageText:
         # Exactly one opening and one closing fence, imports after.
         assert out.split("\n\n")[0] == '---\ntitle: "T"\nauthor: "a"\nstatus: "s"\n---'
 
+    def test_explicit_slug_emitted_after_title(self):
+        out = assemble_page_text("T", "a", "s", None, "B", slug="reference/foo/bar")
+        assert out.split("\n\n")[0] == (
+            '---\ntitle: "T"\nslug: reference/foo/bar\nauthor: "a"\nstatus: "s"\n---'
+        )
+
+    def test_no_slug_line_when_none(self):
+        out = assemble_page_text("T", "a", "s", None, "B")
+        assert "slug:" not in out
+
+
+# ── directory label / slug single-source-of-truth ───────────────────────────
+
+
+class TestDirLabelAndSlug:
+    # A hand-built label map (as build_dir_label_map would produce it): each
+    # directory's relative path segments -> its human dir_doc_name label.
+    LABEL_MAP = {
+        ("sch",): "Scheduling and Multitasking",
+        ("acpi",): "ACPI",
+        ("block",): "Block Devices",
+    }
+
+    def test_label_path_uses_verbatim_label(self):
+        # Drives the Starlight sidebar group label (dir name, used verbatim).
+        assert dir_label_path(Path("sch"), self.LABEL_MAP) == "Scheduling and Multitasking"
+        assert dir_label_path(Path("acpi"), self.LABEL_MAP) == "ACPI"
+
+    def test_slug_path_is_slugified_label(self):
+        # Drives the explicit `slug:` frontmatter (URL).
+        assert dir_slug_path(Path("sch"), self.LABEL_MAP) == "scheduling-and-multitasking"
+        assert dir_slug_path(Path("acpi"), self.LABEL_MAP) == "acpi"
+
+    def test_unmapped_segments_pass_through(self):
+        # A nested dir with no dir_doc_name keeps its original segment.
+        assert dir_label_path(Path("acpi/cpu"), self.LABEL_MAP) == "ACPI/cpu"
+        assert dir_slug_path(Path("acpi/cpu"), self.LABEL_MAP) == "acpi/cpu"
+
+    def test_empty_dir_yields_empty(self):
+        assert dir_label_path(Path("."), self.LABEL_MAP) == ""
+        assert dir_slug_path(Path("."), self.LABEL_MAP) == ""
+
+    def test_label_and_slug_share_one_source(self):
+        # The slug is exactly the slugified label — no independent prediction.
+        for rel in (Path("sch"), Path("block"), Path("acpi/cpu")):
+            label = dir_label_path(rel, self.LABEL_MAP)
+            expected_slug = "/".join(_dir_name_to_slug(seg) for seg in label.split("/"))
+            assert dir_slug_path(rel, self.LABEL_MAP) == expected_slug
+
 
 # ── generate_github_link_safe ────────────────────────────────────────────────
 
@@ -282,15 +389,16 @@ class TestGenerateGithubLink:
 
 class TestFormatEnum:
     def test_basic_enum(self):
-        data = {"file": "test.h"}
-        e = {
-            "name": "color",
-            "members": [
-                {"name": "RED", "value": "0"},
-                {"name": "GREEN", "value": "1"},
-            ],
-        }
-        result = format_enum_as_c_code(data, e, {})
+        e = Enum.from_dict(
+            {
+                "name": "color",
+                "members": [
+                    {"name": "RED", "value": "0"},
+                    {"name": "GREEN", "value": "1"},
+                ],
+            }
+        )
+        result = format_enum_as_c_code(e, "test.h")
         assert "```c" in result
         assert "enum color" in result
         assert "RED = 0" in result
@@ -301,18 +409,19 @@ class TestFormatEnum:
 
 class TestFormatStruct:
     def test_basic_struct(self):
-        data = {"file": "test.h"}
-        s = {
-            "name": "point",
-            "kind": "struct",
-            "size": None,
-            "line": 1,
-            "members": [
-                {"name": "x", "type": "int", "nested": None, "offset": None},
-                {"name": "y", "type": "int", "nested": None, "offset": None},
-            ],
-        }
-        result = format_struct_as_c_code(data, s, {})
+        s = Composite.from_dict(
+            {
+                "name": "point",
+                "kind": "struct",
+                "size": None,
+                "line": 1,
+                "members": [
+                    {"name": "x", "type": "int", "nested": None, "offset": None},
+                    {"name": "y", "type": "int", "nested": None, "offset": None},
+                ],
+            }
+        )
+        result = format_struct_as_c_code(s, "test.h")
         assert "```c" in result
         assert "struct point" in result
         assert "int" in result
@@ -323,54 +432,21 @@ class TestFormatStruct:
 
 class TestFormatFunctionSignature:
     def test_basic_function(self):
-        data = {"file": "test.h"}
-        f = {
-            "name": "add",
-            "return_type": "int",
-            "parameters": [
-                {"type": "int", "name": "a"},
-                {"type": "int", "name": "b"},
-            ],
-            "qualifiers": [],
-            "line": 10,
-        }
-        result = format_function_signature(data, f, {})
+        f = Function.from_dict(
+            {
+                "name": "add",
+                "return_type": "int",
+                "parameters": [
+                    {"type": "int", "name": "a"},
+                    {"type": "int", "name": "b"},
+                ],
+                "qualifiers": [],
+                "line": 10,
+            }
+        )
+        result = format_function_signature(f, "test.h")
         assert "```c" in result
         assert "int add(int a, int b);" in result
-
-
-# ── build_type_table ─────────────────────────────────────────────────────────
-
-
-class TestBuildTypeTable:
-    def test_builds_from_structs(self):
-        c_parse_map = {
-            "test.h": {
-                "types": {
-                    "structs": [{"name": "foo", "kind": "struct", "line": 5}],
-                    "enums": [],
-                    "typedefs": [],
-                },
-                "functions": [],
-            }
-        }
-        table = build_type_table(c_parse_map)
-        assert "struct foo" in table
-        assert table["struct foo"]["line"] == 5
-
-    def test_builds_from_enums(self):
-        c_parse_map = {
-            "test.h": {
-                "types": {
-                    "structs": [],
-                    "enums": [{"name": "bar", "line": 10}],
-                    "typedefs": [],
-                },
-                "functions": [],
-            }
-        }
-        table = build_type_table(c_parse_map)
-        assert "enum bar" in table
 
 
 # ── _dir_name_to_slug ────────────────────────────────────────────────────────

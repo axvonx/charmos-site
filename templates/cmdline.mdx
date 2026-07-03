@@ -1,0 +1,14 @@
+---
+title: "Command-Line Options"
+description: "Boot-time kernel parameters parsed from the bootloader command line."
+---
+
+The charmOS kernel reads boot parameters from the bootloader command line (`key=value`, space-separated). Options are declared in-source with `{{MACRO}}`, and **this page is generated from those declarations** — so it always matches the kernel you are running.
+
+## Options
+
+{{OPTIONS}}
+
+## Listing options at runtime
+
+Pass `help` on the kernel command line to have the kernel print every registered option — with its default and description — and halt. That dump is produced by walking the same declarations this page is built from, so the two never drift apart.

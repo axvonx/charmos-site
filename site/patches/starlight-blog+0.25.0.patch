@@ -1,8 +1,8 @@
 diff --git a/node_modules/starlight-blog/components/starlight/ThemeSelect.astro b/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
-index b795a90..3f47409 100644
+index b795a90..824b3bf 100644
 --- a/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
 +++ b/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
-@@ -1,12 +1,19 @@
+@@ -1,30 +1,61 @@
  ---
 -import { getRelativeBlogUrl } from '../../libs/page'
 +import { getRelativeBlogUrl, getRelativeUrl, isAnyBlogPage } from '../../libs/page'
@@ -11,17 +11,60 @@ index b795a90..3f47409 100644
 -const { locale } = Astro.locals.starlightRoute
 +const { id, locale } = Astro.locals.starlightRoute
 +
-+// On a blog page the header link becomes a way back to the docs; elsewhere it
++// On a blog page the primary link becomes a way back to the docs; elsewhere it
 +// links into the blog. A single header slot that always points the opposite
-+// direction from where you currently are.
++// direction from where you currently are. Alongside it sits a persistent link
++// into the Woboq source browser ("Code"). Both carry icons.
 +const onBlog = isAnyBlogPage(id)
-+const href = onBlog ? getRelativeUrl('/') : getRelativeBlogUrl('/', locale)
-+const label = onBlog ? 'Docs' : getBlogTitle(locale)
++const primaryHref = onBlog ? getRelativeUrl('/') : getRelativeBlogUrl('/', locale)
++const primaryLabel = onBlog ? 'Docs' : getBlogTitle(locale)
++const codeHref = getRelativeUrl('source/charmos/')
  ---
  
- <div>
+-<div>
 -  <a href={getRelativeBlogUrl('/', locale)}>{getBlogTitle(locale)}</a>
-+  <a href={href}>{label}</a>
++<div class="starlight-blog-nav">
++  <a href={primaryHref}>
++    {
++      onBlog ? (
++        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
++      ) : (
++        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8M15 18h-5M10 6h8v4h-8V6z"/></svg>
++      )
++    }
++    <span>{primaryLabel}</span>
++  </a>
++  <a href={codeHref}>
++    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
++    <span>Code</span>
++  </a>
  </div>
  
  <style>
+   div {
+     border-inline-end: 1px solid var(--sl-color-gray-5);
+     display: none;
++    gap: 1rem;
+     padding-inline-end: 1rem;
+   }
+ 
+   @media (min-width: 50rem) {
+     div {
+       display: flex;
++      align-items: center;
+     }
+   }
+ 
+   a {
++    display: inline-flex;
++    align-items: center;
++    gap: 0.35em;
+     color: var(--sl-color-text-accent);
+     font-weight: 600;
+     text-decoration: none;
+   }
++
++  svg {
++    flex: none;
++  }
+ </style>
