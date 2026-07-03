@@ -6,23 +6,52 @@ Clones the source repo, parses every header/source file into JSON in
 parallel, then compiles the JSON into MDX documentation.
 """
 
-import subprocess
+import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
-import sys
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-REPO_URL   = "https://github.com/axvonx/charmos.git"
-CLONE_DIR  = Path("./charmos")
-JSON_OUT   = Path("./json_output")
-MD_OUT     = Path("./docs")
+REPO_URL = "https://github.com/axvonx/charmos.git"
+CLONE_DIR = Path("./charmos")
+JSON_OUT = Path("./json_output")
+MD_OUT = Path("./docs")
 LIMINE_URL = "https://github.com/limine-bootloader/limine"
 LIMINE_DIR = Path("./limine")
+
+# Clang-accurate semantic index (see index_clang.py). Configuring the kernel
+# with CMake emits a compile_commands.json here, which libclang consumes to
+# build clang_index.json — the single source of truth for symbol links.
+CCDB_DIR = CLONE_DIR / "_ccdb"
+CLANG_INDEX = Path("./clang_index.json")
+
+# Woboq source browser (see build_source_browser). Best-effort: needs the
+# codebrowser_generator binary (build from https://github.com/KDAB/codebrowser).
+# Auto-discovered from .tools/woboq/ if present; overridable via env.
+_WOBOQ_LOCAL = Path(".tools/woboq")
+WOBOQ_GEN = os.environ.get("WOBOQ_GENERATOR") or str(_WOBOQ_LOCAL / "codebrowser_generator")
+WOBOQ_IDX = os.environ.get("WOBOQ_INDEXGENERATOR") or str(
+    _WOBOQ_LOCAL / "codebrowser_indexgenerator"
+)
+WOBOQ_DATA = os.environ.get("WOBOQ_DATA") or (
+    str(_WOBOQ_LOCAL / "data") if (_WOBOQ_LOCAL / "data").exists() else None
+)
+# Served statically by Astro from site/public/ → available at /source/.
+SOURCE_BROWSER_OUT = Path("./site/public/source")
+SOURCE_BROWSER_URL = "/source"  # data assets live at /source/data
+SOURCE_BROWSER_PROJECT = "charmos"  # → /source/charmos/<file>.html#<line>
+
+# Resident (hand-authored) doc pages. This tree mirrors the final docs layout;
+# generated content is overlaid on top of it during assembly.
+CONTENT_SRC = Path("./content")
+# Final Astro content collection. Fully rebuilt each run from CONTENT_SRC +
+# generated reference (MD_OUT) + generated guides — never edited by hand.
+SITE_DOCS = Path("./site/src/content/docs")
 
 SOURCE_DIRS = [
     "include",
@@ -35,30 +64,35 @@ MAX_WORKERS = min(16, (os.cpu_count() or 4) * 2)
 
 ESC = "\033["
 
+
 def _c(*codes):
     return f"{ESC}{';'.join(str(c) for c in codes)}m"
 
-RESET   = _c(0)
-BOLD    = _c(1)
-DIM     = _c(2)
+
+RESET = _c(0)
+BOLD = _c(1)
+DIM = _c(2)
 
 # foreground colours
-WHITE   = _c(97)
-GRAY    = _c(90)
-CYAN    = _c(96)
-GREEN   = _c(92)
-YELLOW  = _c(93)
-RED     = _c(91)
+WHITE = _c(97)
+GRAY = _c(90)
+CYAN = _c(96)
+GREEN = _c(92)
+YELLOW = _c(93)
+RED = _c(91)
 MAGENTA = _c(95)
-BLUE    = _c(94)
+BLUE = _c(94)
 
 # background colours
 BG_DARK = _c(40)
 
+
 def supports_color() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
+
 USE_COLOR = supports_color()
+
 
 def c(text: str, *codes) -> str:
     if not USE_COLOR:
@@ -68,44 +102,50 @@ def c(text: str, *codes) -> str:
 
 # ── Layout constants ──────────────────────────────────────────────────────────
 
-BAR_WIDTH   = 28        # characters wide for the progress fill
+BAR_WIDTH = 28  # characters wide for the progress fill
 STEP_INDENT = "  "
 
 # ── Thread-safe output ────────────────────────────────────────────────────────
 
 _print_lock = threading.Lock()
 
+
 def term_width() -> int:
     return shutil.get_terminal_size((100, 24)).columns
+
 
 def _clear_line():
     if USE_COLOR:
         sys.stdout.write(f"\r{ESC}2K")
+
 
 def safe_print(*args, **kwargs):
     with _print_lock:
         _clear_line()
         print(*args, **kwargs)
 
+
 # ── Progress bar ──────────────────────────────────────────────────────────────
+
 
 class ProgressBar:
     """
     A single-line progress bar rendered on stdout.
     Thread-safe — callers update via .advance() from any thread.
     """
-    FILL  = "█"
+
+    FILL = "█"
     EMPTY = "░"
-    SPIN  = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, total: int, label: str):
-        self.total    = max(total, 1)
-        self.label    = label
-        self._done    = 0
-        self._lock    = threading.Lock()
-        self._spin_i  = 0
-        self._active  = True
-        self._last    = ""
+        self.total = max(total, 1)
+        self.label = label
+        self._done = 0
+        self._lock = threading.Lock()
+        self._spin_i = 0
+        self._active = True
+        self._last = ""
 
         self._thread = threading.Thread(target=self._tick, daemon=True)
         self._thread.start()
@@ -116,8 +156,8 @@ class ProgressBar:
 
     def finish(self):
         with self._lock:
-            self._done    = self.total
-            self._active  = False
+            self._done = self.total
+            self._active = False
         self._thread.join()
         self._render(final=True)
         sys.stdout.write("\n")
@@ -131,22 +171,19 @@ class ProgressBar:
 
     def _render(self, final: bool = False):
         with self._lock:
-            done  = self._done
+            done = self._done
             total = self.total
 
-        pct   = done / total
+        pct = done / total
         filled = int(BAR_WIDTH * pct)
-        empty  = BAR_WIDTH - filled
+        empty = BAR_WIDTH - filled
 
-        bar = (
-            c(self.FILL * filled,  GREEN, BOLD) +
-            c(self.EMPTY * empty,  GRAY)
-        )
+        bar = c(self.FILL * filled, GREEN, BOLD) + c(self.EMPTY * empty, GRAY)
 
         spinner = c(self.SPIN[self._spin_i], CYAN, BOLD) if not final else c("✓", GREEN, BOLD)
         pct_str = c(f"{int(pct*100):3d}%", WHITE, BOLD)
-        count   = c(f"{done}/{total}", GRAY)
-        label   = c(self.label, CYAN)
+        count = c(f"{done}/{total}", GRAY)
+        label = c(self.label, CYAN)
 
         line = f"\r  {spinner} {label}  [{bar}] {pct_str}  {count}"
 
@@ -162,26 +199,29 @@ class ProgressBar:
 
 # ── Step decorator ────────────────────────────────────────────────────────────
 
-_STEP_NUM  = 0
+_STEP_NUM = 0
 _STEP_LOCK = threading.Lock()
+
 
 def begin_step(name: str, detail: str = "") -> float:
     global _STEP_NUM
     with _STEP_LOCK:
         _STEP_NUM += 1
         n = _STEP_NUM
-    num_str  = c(f"[{n:02d}]", BLUE, BOLD)
+    num_str = c(f"[{n:02d}]", BLUE, BOLD)
     name_str = c(name, WHITE, BOLD)
-    det_str  = (c(f"  {detail}", GRAY)) if detail else ""
+    det_str = (c(f"  {detail}", GRAY)) if detail else ""
     safe_print(f"\n{num_str} {name_str}{det_str}")
     return time.monotonic()
 
+
 def end_step(t0: float, note: str = ""):
     elapsed = time.monotonic() - t0
-    tick    = c("✓", GREEN, BOLD)
-    time_s  = c(f"{elapsed:.1f}s", GRAY)
-    note_s  = c(f"  {note}", DIM) if note else ""
+    tick = c("✓", GREEN, BOLD)
+    time_s = c(f"{elapsed:.1f}s", GRAY)
+    note_s = c(f"  {note}", DIM) if note else ""
     safe_print(f"  {tick} done  {time_s}{note_s}")
+
 
 def fail_step(msg: str):
     cross = c("✗", RED, BOLD)
@@ -191,6 +231,7 @@ def fail_step(msg: str):
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 
+
 def print_banner():
     lines = [
         "",
@@ -198,11 +239,12 @@ def print_banner():
         c(f" workers: {MAX_WORKERS}  •  python {sys.version.split()[0]} ", GRAY),
         "",
     ]
-    for l in lines:
-        print(l)
+    for line in lines:
+        print(line)
 
 
 # ── Pipeline steps ────────────────────────────────────────────────────────────
+
 
 def clone_repo():
     t0 = begin_step("Clone repository", REPO_URL)
@@ -213,7 +255,7 @@ def clone_repo():
         return
 
     _run(["git", "clone", "--depth=1", REPO_URL, str(CLONE_DIR)])
-    _run(["git", "submodule", "init"],   cwd=CLONE_DIR)
+    _run(["git", "submodule", "init"], cwd=CLONE_DIR)
     _run(["git", "submodule", "update"], cwd=CLONE_DIR)
 
     tests_dir = CLONE_DIR / "kernel/uACPI/tests"
@@ -221,13 +263,136 @@ def clone_repo():
         shutil.rmtree(tests_dir)
 
     if not LIMINE_DIR.exists():
-        _run([
-            "git", "clone",
-            "--branch=v9.x-binary", "--depth=1",
-            LIMINE_URL, str(LIMINE_DIR),
-        ])
+        _run(
+            [
+                "git",
+                "clone",
+                "--branch=v9.x-binary",
+                "--depth=1",
+                LIMINE_URL,
+                str(LIMINE_DIR),
+            ]
+        )
 
     end_step(t0)
+
+
+def _toolchain_file() -> Path | None:
+    """Pick the CMake toolchain file the kernel uses for this platform."""
+    import platform
+
+    scripts = CLONE_DIR / "scripts"
+    name = "macos_toolchain.cmake" if platform.system() == "Darwin" else "toolchain.cmake"
+    tc = scripts / name
+    return tc if tc.exists() else None
+
+
+def generate_compile_commands():
+    """Configure the kernel with CMake to emit compile_commands.json.
+
+    Configure-only: a full kernel build is not required for clang tooling. This
+    is best-effort — if CMake or the cross toolchain is unavailable, the docs
+    still build, just without clang-accurate symbol links.
+    """
+    t0 = begin_step("Generate compile_commands", str(CCDB_DIR))
+
+    if shutil.which("cmake") is None or not (CLONE_DIR / "CMakeLists.txt").exists():
+        end_step(t0, c("skipped — no cmake/CMakeLists", GRAY))
+        return False
+
+    cmd = ["cmake", "-S", str(CLONE_DIR), "-B", str(CCDB_DIR), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+    tc = _toolchain_file()
+    if tc is not None:
+        cmd.append(f"-DCMAKE_TOOLCHAIN_FILE={tc.resolve()}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    ccjson = CCDB_DIR / "compile_commands.json"
+    if result.returncode != 0 or not ccjson.exists():
+        safe_print(c("  ⚠  configure failed — skipping clang index", YELLOW))
+        safe_print(c(result.stderr.strip()[-400:], GRAY))
+        end_step(t0, c("unavailable", YELLOW))
+        return False
+
+    end_step(t0, "ok")
+    return True
+
+
+def build_clang_index():
+    """Build clang_index.json from compile_commands.json via libclang."""
+    t0 = begin_step("Build clang index", str(CLANG_INDEX))
+    try:
+        import index_clang
+    except Exception as e:  # libclang not importable
+        safe_print(c(f"  ⚠  index_clang unavailable: {e}", YELLOW))
+        end_step(t0, c("skipped", YELLOW))
+        return False
+
+    index = index_clang.index_compile_commands(CCDB_DIR, root=CLONE_DIR)
+    index.save(CLANG_INDEX)
+    end_step(t0, f"{len(index.symbols)} symbols, {len(index.references)} refs")
+    return True
+
+
+def _resolve_tool(name):
+    """Find a tool on PATH or accept an explicit path from the env var."""
+    return shutil.which(name) or (name if Path(name).exists() else None)
+
+
+def build_source_browser():
+    """Generate a Woboq clang cross-referenced source browser into site/public/source.
+
+    Best-effort: skips cleanly if codebrowser_generator isn't available. Emits a
+    static, clickable view of the whole codebase that docs deep-link into
+    (``/source/charmos/<file>.html#<line>``). Returns True on success.
+    """
+    t0 = begin_step("Build source browser", str(SOURCE_BROWSER_OUT))
+    gen = _resolve_tool(WOBOQ_GEN)
+    ccjson = CCDB_DIR / "compile_commands.json"
+    if gen is None or not ccjson.exists():
+        end_step(t0, c("skipped — woboq/compile_commands unavailable", GRAY))
+        return False
+
+    if SOURCE_BROWSER_OUT.exists():
+        shutil.rmtree(SOURCE_BROWSER_OUT)
+    SOURCE_BROWSER_OUT.mkdir(parents=True)
+
+    src_root = CLONE_DIR.resolve()
+    # Woboq may emit per-file errors for the kernel's x86 flags on a non-x86
+    # host; it still annotates everything it can parse, so we tolerate a
+    # non-zero exit as long as HTML was produced.
+    subprocess.run(
+        [
+            gen,
+            "-b",
+            str(CCDB_DIR.resolve()),
+            "-a",
+            "-o",
+            str(SOURCE_BROWSER_OUT.resolve()),
+            "-p",
+            f"{SOURCE_BROWSER_PROJECT}:{src_root}",
+            "-d",
+            f"{SOURCE_BROWSER_URL}/data",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    html_count = len(list(SOURCE_BROWSER_OUT.rglob("*.html")))
+    if html_count == 0:
+        safe_print(c("  ⚠  source browser produced no output — skipping", YELLOW))
+        end_step(t0, c("unavailable", YELLOW))
+        return False
+
+    idx = _resolve_tool(WOBOQ_IDX)
+    if idx is not None:
+        subprocess.run([idx, str(SOURCE_BROWSER_OUT.resolve())], capture_output=True, text=True)
+
+    # Copy Woboq's static assets (js/css) to /source/data.
+    if WOBOQ_DATA and Path(WOBOQ_DATA).exists():
+        shutil.copytree(WOBOQ_DATA, SOURCE_BROWSER_OUT / "data", dirs_exist_ok=True)
+
+    end_step(t0, f"{html_count} files")
+    return True
 
 
 def prepare_output_dirs():
@@ -240,7 +405,7 @@ def prepare_output_dirs():
 
 
 def _json_path_for(file_path: Path) -> Path:
-    parents  = file_path.parts[-3:-1]
+    parents = file_path.parts[-3:-1]
     name_bits = list(parents) + [file_path.stem]
     return JSON_OUT / ("_".join(name_bits) + ".json")
 
@@ -258,9 +423,10 @@ def run_make_json():
         safe_print(c("  ⚠  no source files found", YELLOW))
         return
 
-    t0  = begin_step("Parse source files → JSON", f"{len(files)} files  •  {MAX_WORKERS} workers")
+    t0 = begin_step("Parse source files → JSON", f"{len(files)} files  •  {MAX_WORKERS} workers")
     bar = ProgressBar(len(files), "parsing")
     errors: list[str] = []
+    warnings: list[str] = []
     err_lock = threading.Lock()
 
     def parse_one(f: Path):
@@ -268,11 +434,18 @@ def run_make_json():
         try:
             result = subprocess.run(
                 ["python3", "make_json.py", str(f), str(out)],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if result.returncode != 0:
                 with err_lock:
-                    errors.append(f"{f.name}: {result.stderr.strip()[:120]}")
+                    # Keep the full stderr — a clipped traceback is what masked
+                    # the tree-sitter breakage that took CI down.
+                    errors.append(f"{f.name}:\n{result.stderr.strip()}")
+            elif result.stderr.strip():
+                # Non-fatal diagnostics (e.g. orphaned idea bodies).
+                with err_lock:
+                    warnings.extend(result.stderr.strip().splitlines())
         except Exception as e:
             with err_lock:
                 errors.append(f"{f.name}: {e}")
@@ -286,6 +459,8 @@ def run_make_json():
 
     bar.finish()
 
+    succeeded = len(files) - len(errors)
+
     if errors:
         safe_print(c(f"  ⚠  {len(errors)} file(s) had errors:", YELLOW))
         for e in errors[:8]:
@@ -293,7 +468,20 @@ def run_make_json():
         if len(errors) > 8:
             safe_print(c(f"     … and {len(errors)-8} more", GRAY))
 
-    end_step(t0, f"{len(files) - len(errors)}/{len(files)} succeeded")
+    if warnings:
+        safe_print(c(f"  ⚠  {len(warnings)} warning(s):", YELLOW))
+        for w in warnings[:10]:
+            safe_print(c(f"     • {w.replace('[make_json] warning: ', '')}", GRAY))
+        if len(warnings) > 10:
+            safe_print(c(f"     … and {len(warnings)-10} more", GRAY))
+
+    # A total wipe-out (nothing parsed) is a systemic failure — e.g. a broken
+    # dependency — and must stop the build loudly rather than silently emit an
+    # empty docs tree that only explodes later during assembly.
+    if files and succeeded == 0:
+        fail_step("all source files failed to parse — aborting")
+
+    end_step(t0, f"{succeeded}/{len(files)} succeeded")
 
 
 def run_make_md():
@@ -319,7 +507,8 @@ def run_make_md():
 
     result = subprocess.run(
         ["python3", "make_md.py", str(JSON_OUT)],
-        capture_output=False, text=True,
+        capture_output=False,
+        text=True,
     )
 
     done_event.set()
@@ -333,7 +522,7 @@ def run_make_md():
 
 
 def delete_empty_markdown():
-    t0    = begin_step("Remove empty markdown files")
+    t0 = begin_step("Remove empty markdown files")
     paths = list(MD_OUT.glob("**/*.md"))
     count = 0
     for path in paths:
@@ -344,13 +533,13 @@ def delete_empty_markdown():
 
 
 def copy_directory_indexes():
-    src_root  = Path("charmos/include")
+    src_root = Path("charmos/include")
     docs_root = Path("docs")
-    indexes   = list(src_root.rglob("index.mdx"))
+    indexes = list(src_root.rglob("index.mdx"))
     if not indexes:
         return
 
-    t0  = begin_step("Copy directory index files", f"{len(indexes)} found")
+    t0 = begin_step("Copy directory index files", f"{len(indexes)} found")
     bar = ProgressBar(len(indexes), "copying")
 
     for index_file in indexes:
@@ -364,10 +553,10 @@ def copy_directory_indexes():
 
 
 def rename_directories_from_namefiles():
-    src_root  = Path("charmos/include")
+    src_root = Path("charmos/include")
     docs_root = Path("docs")
 
-    t0      = begin_step("Rename directories from name-files")
+    t0 = begin_step("Rename directories from name-files")
     renamed = 0
 
     for src_dir in src_root.rglob("*"):
@@ -380,7 +569,7 @@ def rename_directories_from_namefiles():
         if not new_name:
             continue
 
-        docs_equiv   = docs_root / src_dir.relative_to(src_root)
+        docs_equiv = docs_root / src_dir.relative_to(src_root)
         new_docs_path = docs_equiv.parent / new_name
 
         if not docs_equiv.exists() or docs_equiv.name == new_name or new_docs_path.exists():
@@ -392,7 +581,77 @@ def rename_directories_from_namefiles():
     end_step(t0, f"{renamed} director{'ies' if renamed != 1 else 'y'} renamed")
 
 
+def run_make_cmdline():
+    """Generate the command-line options guide from the cloned source."""
+    t0 = begin_step("Generate command-line guide", "guides/cmdline.mdx")
+
+    out = MD_OUT / "guides" / "cmdline.mdx"
+    result = subprocess.run(
+        ["python3", "make_cmdline.py", str(CLONE_DIR), "-o", str(out)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        fail_step(f"make_cmdline.py failed:\n{result.stderr.strip()}")
+
+    note = result.stderr.strip() or "ok"
+    end_step(t0, note)
+
+
+def _copy_tree(src: Path, dest: Path):
+    """Recursively copy ``src`` into ``dest`` (creating ``dest`` as needed)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in src.rglob("*"):
+        target = dest / item.relative_to(src)
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+
+
+def assemble_site_content():
+    """Build ``site/src/content/docs`` from resident + generated sources.
+
+    Layout of the final tree:
+      * ``/``           — resident pages from ``content/`` (splash, section indexes)
+      * ``/reference/`` — generated API docs from ``docs/`` (MD_OUT)
+      * ``/guides/``    — resident guides + generated ``cmdline.mdx``
+    """
+    t0 = begin_step("Assemble site content", str(SITE_DOCS))
+
+    if SITE_DOCS.exists():
+        shutil.rmtree(SITE_DOCS)
+    SITE_DOCS.mkdir(parents=True)
+
+    # 1. Resident pages (content/ mirrors the final layout 1:1).
+    if CONTENT_SRC.exists():
+        _copy_tree(CONTENT_SRC, SITE_DOCS)
+
+    # 2. Generated reference pages land under reference/ (index comes from
+    #    content/reference/index.mdx, copied in step 1).
+    if MD_OUT.exists():
+        for item in MD_OUT.iterdir():
+            # guides/ is generated separately below; everything else is reference
+            if item.name == "guides":
+                continue
+            dest = SITE_DOCS / "reference" / item.name
+            if item.is_dir():
+                _copy_tree(item, dest)
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, dest)
+
+    # 3. Generated guides (e.g. cmdline.mdx) overlay the resident guides.
+    gen_guides = MD_OUT / "guides"
+    if gen_guides.exists():
+        _copy_tree(gen_guides, SITE_DOCS / "guides")
+
+    end_step(t0)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _run(cmd, **kwargs):
     result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
@@ -401,6 +660,7 @@ def _run(cmd, **kwargs):
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
 
 def main():
     print_banner()
@@ -415,17 +675,23 @@ def main():
     end_step(t0)
 
     clone_repo()
+    if generate_compile_commands():
+        build_clang_index()
+        # Symbol links point into the source browser when it's available.
+        if build_source_browser():
+            os.environ["CHARMOS_SOURCE_BROWSER"] = f"{SOURCE_BROWSER_URL}/{SOURCE_BROWSER_PROJECT}"
     prepare_output_dirs()
     run_make_json()
     run_make_md()
+    run_make_cmdline()
     rename_directories_from_namefiles()
     delete_empty_markdown()
     copy_directory_indexes()
+    assemble_site_content()
 
     total_elapsed = time.monotonic() - t_total
     safe_print(
-        f"\n{c('  ✓  build complete', GREEN, BOLD)}"
-        f"  {c(f'{total_elapsed:.1f}s total', GRAY)}\n"
+        f"\n{c('  ✓  build complete', GREEN, BOLD)}" f"  {c(f'{total_elapsed:.1f}s total', GRAY)}\n"
     )
 
 

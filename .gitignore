@@ -1,6 +1,34 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Node / Astro ──────────────────────────────────────────────────────────────
 node_modules/
-json_output/
-site/.astro
 site/node_modules
+site/.astro
+site/dist/
+
+# ── Cloned sources (fetched by generate.py) ───────────────────────────────────
 charmos/
 limine/
+
+# ── Build artifacts (regenerated every run) ───────────────────────────────────
+json_output/
+# Intermediate reference MDX (make_md.py)
+docs/
+# Assembled Astro content collection — rebuilt from content/ + generated docs
+site/src/content/docs/
+# Clang-accurate semantic index (index_clang.py)
+clang_index.json
+# Generated Woboq source browser (build_source_browser)
+site/public/source/
+# Persisted Woboq codebrowser binaries (discovered by generate.py)
+.tools/

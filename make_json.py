@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
+"""Parse a single C header/source file into the pipeline's JSON representation.
 
-import re
+Uses tree-sitter to extract structs, enums, typedefs, functions, defines, and
+the embedded ``@idea:`` doc-comments (with their metadata + cross-references).
+Invoked per-file by ``generate.py`` — ``make_json.py <source> <out.json>`` —
+so the parse can be fanned out across processes.
+"""
+
+import difflib
 import json
-import sys, shutil
+import re
+import shutil
+import sys
 from pathlib import Path
-import tempfile
-import subprocess
-from tree_sitter import Language, Parser
-from pathlib import Path
+
 from tree_sitter_language_pack import get_parser
-from tree_sitter import Parser
 
 FILE_TITLE_RE = re.compile(r"/\*\s*@title:\s*(.+?)\s*\*/", re.IGNORECASE | re.DOTALL)
 
 IDEA_REF_RE = re.compile(r'\]:\s*"([^"]+)"')
-IDEA_SIGNATURE_RE = re.compile(
-    r"/\*\s*@idea:(small|big|huge)\s+(.+?)\s*\*/", re.UNICODE
-)
+IDEA_SIGNATURE_RE = re.compile(r"/\*\s*@idea:(small|big|huge)\s+(.+?)\s*\*/", re.UNICODE)
 FILE_RE = re.compile(r"([./\w\-]+?\.(c|h|rs|cpp|txt|md))", re.UNICODE)
 FUNC_REF_RE = re.compile(r"`([a-zA-Z_][a-zA-Z0-9_]*)\(\)`", re.UNICODE)
 IGNORED_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof"}
@@ -145,11 +148,108 @@ def get_typedef_type(type_node, declarator_node, code_bytes):
     return type_str
 
 
+_C_TYPE_KEYWORDS = {
+    "struct",
+    "union",
+    "enum",
+    "void",
+    "const",
+    "volatile",
+    "unsigned",
+    "signed",
+    "static",
+    "extern",
+    "register",
+    "auto",
+    "typedef",
+    "inline",
+    "char",
+    "short",
+    "int",
+    "long",
+    "float",
+    "double",
+}
+
+
+def _macro_continuation_lines(code_bytes) -> set:
+    """Return the set of 1-based line numbers that lie inside a multi-line
+    preprocessor directive — a ``#define`` (or any ``#``-directive) and every
+    line joined to it by a trailing backslash.
+
+    tree-sitter only parses the first line or two of a complex function-like
+    macro body (e.g. a ``({ ... })`` statement expression); its error recovery
+    then surfaces the remaining body statements as if they were file-scope
+    declarations. Those phantom globals all live on continuation lines, so we
+    reject any global whose declaration starts on one.
+    """
+    text = code_bytes.decode("utf-8", errors="replace")
+    lines = set()
+    in_directive = False
+    for i, line in enumerate(text.split("\n"), start=1):
+        starts = line.lstrip().startswith("#")
+        if starts or in_directive:
+            lines.add(i)
+        cont = line.rstrip("\r").endswith("\\")
+        if starts:
+            in_directive = cont
+        elif in_directive:
+            in_directive = cont
+    return lines
+
+
+def _looks_like_macro_noise(name, var_type, raw):
+    """Reject 'global variables' that are really macro artifacts tree-sitter
+    mis-parses (e.g. ``LIMINE_DEPRECATED foo;`` or ``struct LIMINE_MP(info);``).
+
+    Real extern/global declarations have a lowercase/keyword type and a plain
+    identifier name; the misparses leave a bare keyword as the name, an
+    ALL-CAPS macro as the type, or a ``MACRO(...)`` call in the text.
+    """
+    if not name or name in _C_TYPE_KEYWORDS:
+        return True
+    if not re.match(r"^[A-Za-z_]\w*$", name):
+        return True
+    # A macro invocation like `struct LIMINE_MP(info);`
+    if re.search(r"\b[A-Z][A-Z0-9_]{2,}\s*\(", raw or ""):
+        return True
+    # The "type" is nothing but an ALL-CAPS macro token (e.g. LIMINE_DEPRECATED)
+    base = re.sub(r"\b(struct|union|enum|const|volatile|unsigned|signed)\b", "", var_type or "")
+    base = base.replace("*", "").strip()
+    if base and re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", base):
+        return True
+    return False
+
+
+def _declarator_name(declarator_node, code_bytes):
+    """Walk a variable declarator (pointer/array/init wrappers) to its bare
+    identifier name. Returns None if no identifier is found."""
+    node = declarator_node
+    while node is not None:
+        if node.type == "identifier":
+            return node_text(node, code_bytes)
+        if node.type in (
+            "pointer_declarator",
+            "array_declarator",
+            "init_declarator",
+        ):
+            node = node.child_by_field_name("declarator")
+            continue
+        # Unknown wrapper — fall back to a regex over its text.
+        raw = node_text(node, code_bytes) or ""
+        m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)", raw)
+        return m.group(1) if m else None
+    return None
+
+
 def extract_typedef_name(declarator_node, code_bytes):
     node = declarator_node
     while node:
-        if node.type in ("pointer_declarator", "function_declarator",
-                         "abstract_pointer_declarator"):
+        if node.type in (
+            "pointer_declarator",
+            "function_declarator",
+            "abstract_pointer_declarator",
+        ):
             node = node.child_by_field_name("declarator")
         else:
             break
@@ -158,7 +258,7 @@ def extract_typedef_name(declarator_node, code_bytes):
         # tree-sitter sometimes gives us the full (*name) or (*name)(params)
         # wrapper text when it can't resolve the inner identifier as a separate
         # node.  Strip the pointer-declarator syntax to get the bare name.
-        m = re.match(r'^\(\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', raw)
+        m = re.match(r"^\(\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", raw)
         if m:
             return m.group(1)
         return raw
@@ -178,9 +278,7 @@ def extract_function_name_and_params(declarator_node, code_bytes):
             break
 
     func_name = (
-        code_bytes[node.start_byte : node.end_byte].decode("utf-8").strip()
-        if node
-        else None
+        code_bytes[node.start_byte : node.end_byte].decode("utf-8").strip() if node else None
     )
 
     parameters = []
@@ -208,20 +306,6 @@ def extract_function_name_and_params(declarator_node, code_bytes):
     return func_name, parameters
 
 
-def extract_function_qualifiers(node, code_bytes):
-    qualifiers = []
-    for child in node.children:
-        if child.type == "storage_class_specifier" or child.type == "type_qualifier":
-            text = code_bytes[child.start_byte : child.end_byte].decode("utf-8").strip()
-            if text:
-                qualifiers.append(text)
-        elif child.type == "function_specifier":
-            text = code_bytes[child.start_byte : child.end_byte].decode("utf-8").strip()
-            if text:
-                qualifiers.append(text)
-    return qualifiers
-
-
 def is_function_prototype(declarator):
     node = declarator
     while node:
@@ -246,8 +330,15 @@ def node_text(node, code):
     # Collapse newline + any following whitespace into a single space so that
     # multi-line declarators (e.g. function-pointer members split across lines)
     # don't carry raw indentation into the JSON.
-    text = re.sub(r'\n\s*', ' ', text)
+    text = re.sub(r"\n\s*", " ", text)
     return text
+
+
+def node_raw_text(node, code):
+    """Like node_text but preserves line breaks (for multi-line macro bodies)."""
+    if not node:
+        return None
+    return code[node.start_byte : node.end_byte].decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +423,7 @@ def collect_struct_recursive(node, code, seen_ids=None):
                     nested = collect_struct_recursive(type_node, code, seen_ids)
                     if nested:
                         inner_kind = kind_map.get(type_node.type, "struct")
-                        member["type"] = f"{inner_kind}"   # no name — anonymous
+                        member["type"] = f"{inner_kind}"  # no name — anonymous
                         member["nested"] = nested
 
             members.append(member)
@@ -344,7 +435,6 @@ def collect_struct_recursive(node, code, seen_ids=None):
         "line": node.start_point[0] + 1,
     }
     return result
-
 
 
 def extract_fn_ptr_info(type_node, declarator_node, code):
@@ -416,6 +506,10 @@ def parse_c_types_and_functions(filename):
     tree = parser.parse(code)
     root = tree.root_node
 
+    # Lines inside multi-line macro bodies — used to reject phantom globals
+    # tree-sitter leaks out of function-like macros (see helper for details).
+    macro_lines = _macro_continuation_lines(code)
+
     functions = []
     structs = []
     enums = []
@@ -463,6 +557,40 @@ def parse_c_types_and_functions(filename):
                         "line": node.start_point[0] + 1,
                     }
                 )
+            elif decl and not (
+                type_node
+                and type_node.type in ("struct_specifier", "union_specifier", "enum_specifier")
+                and type_node.child_by_field_name("body") is not None
+            ):
+                # A file-scope variable declaration — most often `extern <type>
+                # <name>;` in a header. (Function prototypes are handled above;
+                # a struct/enum *definition* with a trailing declarator is almost
+                # always `struct X { … } __packed;` — an attribute macro, not a
+                # variable — so those are excluded by the guard above and the
+                # struct is recorded via its own specifier branch.)
+                var_name = _declarator_name(decl, code)
+                var_type = get_full_return_type(type_node, decl, code)
+                raw_text = node_text(node, code)
+                on_macro_line = (node.start_point[0] + 1) in macro_lines
+                if (
+                    var_name
+                    and not on_macro_line
+                    and not _looks_like_macro_noise(var_name, var_type, raw_text)
+                ):
+                    storage = [
+                        node_text(ch, code)
+                        for ch in node.children
+                        if ch.type == "storage_class_specifier"
+                    ]
+                    globals_vars.append(
+                        {
+                            "name": var_name,
+                            "type": var_type,
+                            "storage": " ".join(s for s in storage if s),
+                            "raw_text": raw_text,
+                            "line": node.start_point[0] + 1,
+                        }
+                    )
 
         elif node.type in ("struct_specifier", "union_specifier"):
             # Only record if it has a body (i.e. is a definition, not a reference)
@@ -493,9 +621,7 @@ def parse_c_types_and_functions(filename):
                 recorded_enum_ids.add(nid)
                 name = node_text(node.child_by_field_name("name"), code)
                 members = collect_enum_members(body, code)
-                enums.append(
-                    {"name": name, "members": members, "line": node.start_point[0] + 1}
-                )
+                enums.append({"name": name, "members": members, "line": node.start_point[0] + 1})
 
         elif node.type == "type_definition":
 
@@ -542,50 +668,60 @@ def parse_c_types_and_functions(filename):
         elif node.type == "preproc_def":
             # Simple #define NAME value
             name_node = node.child_by_field_name("name")
-            val_node  = node.child_by_field_name("value")
-            def_name  = node_text(name_node, code)
+            val_node = node.child_by_field_name("value")
+            def_name = node_text(name_node, code)
             if def_name and def_name not in IGNORED_KEYWORDS:
                 raw_val = node_text(val_node, code) if val_node else ""
-                raw_full = node_text(node, code) or ""
+                raw_full = node_raw_text(node, code) or ""
                 multiline = "\\" in raw_full or "\
-" in (code[node.start_byte:node.end_byte].decode("utf-8"))
-                defines.append({
-                    "name": def_name,
-                    "params": None,
-                    "value": raw_val or "",
-                    "raw_text": raw_full,
-                    "multiline": multiline,
-                    "line": node.start_point[0] + 1,
-                })
+" in (code[node.start_byte : node.end_byte].decode("utf-8"))
+                defines.append(
+                    {
+                        "name": def_name,
+                        "params": None,
+                        "value": raw_val or "",
+                        "raw_text": raw_full,
+                        "multiline": multiline,
+                        "line": node.start_point[0] + 1,
+                    }
+                )
 
         elif node.type == "preproc_function_def":
             # Function-like #define NAME(params...) body
-            name_node   = node.child_by_field_name("name")
+            name_node = node.child_by_field_name("name")
             params_node = node.child_by_field_name("parameters")
-            val_node    = node.child_by_field_name("value")
-            def_name    = node_text(name_node, code)
+            val_node = node.child_by_field_name("value")
+            def_name = node_text(name_node, code)
             if def_name and def_name not in IGNORED_KEYWORDS:
                 params_raw = node_text(params_node, code) if params_node else "()"
-                raw_val  = node_text(val_node, code) if val_node else ""
-                raw_full = node_text(node, code) or ""
-                raw_bytes = code[node.start_byte:node.end_byte].decode("utf-8")
+                raw_val = node_text(val_node, code) if val_node else ""
+                raw_full = node_raw_text(node, code) or ""
+                raw_bytes = code[node.start_byte : node.end_byte].decode("utf-8")
                 multiline = "\\" in raw_full or "\
 " in raw_bytes
-                defines.append({
-                    "name": def_name,
-                    "params": params_raw,
-                    "value": raw_val or "",
-                    "raw_text": raw_full,
-                    "multiline": multiline,
-                    "line": node.start_point[0] + 1,
-                })
+                defines.append(
+                    {
+                        "name": def_name,
+                        "params": params_raw,
+                        "value": raw_val or "",
+                        "raw_text": raw_full,
+                        "multiline": multiline,
+                        "line": node.start_point[0] + 1,
+                    }
+                )
 
         # Recurse — but don't descend into nodes we've already handled above
         # (struct/enum bodies are handled inside collect_struct_recursive /
         # collect_enum_members, not by the visitor).
-        if node.type not in ("struct_specifier", "union_specifier", "enum_specifier",
-                              "type_definition", "function_definition",
-                              "preproc_def", "preproc_function_def"):
+        if node.type not in (
+            "struct_specifier",
+            "union_specifier",
+            "enum_specifier",
+            "type_definition",
+            "function_definition",
+            "preproc_def",
+            "preproc_function_def",
+        ):
             for child in node.children:
                 visit(child)
 
@@ -606,9 +742,7 @@ def parse_c_types_and_functions(filename):
 def extract_commits(md_text: str):
     commits = []
     for match in COMMIT_RE.finditer(md_text):
-        commits.append(
-            {"hash": match.group(1), "start_idx": match.start(), "end_idx": match.end()}
-        )
+        commits.append({"hash": match.group(1), "start_idx": match.start(), "end_idx": match.end()})
     return commits
 
 
@@ -648,13 +782,132 @@ def extract_audience(md_text: str):
     return "\n".join(cleaned_lines), audience
 
 
+IDEA_BODY_HEADING_RE = re.compile(
+    r"^[\s/*]*#\s*(Big|Small|Huge)\s+Idea\s*:\s*(.+?)\s*$", re.IGNORECASE
+)
+
+
+# Standard Idea body sections. Authors may add bespoke sections freely — this
+# vocabulary is only used to flag *likely typos* (a heading that closely
+# resembles a standard one), never to reject unknown section names outright.
+KNOWN_IDEA_SECTIONS = {
+    "credits",
+    "overview",
+    "background",
+    "summary",
+    "api",
+    "errors",
+    "context",
+    "constraints",
+    "internals",
+    "strategy",
+    "rationale",
+    "notes",
+    "changelog",
+    "motivation",
+    "design",
+    "implementation",
+    "usage",
+    "examples",
+    "caveats",
+    "references",
+    "todo",
+    "bugs",
+    "commits",
+    "audience",
+}
+
+_IDEA_BODY_SIZE_RE = re.compile(r"^#\s*(Big|Small|Huge)\s+Idea\b", re.IGNORECASE)
+_IDEA_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$")
+
+
+def _normalize_idea_name(s):
+    """Collapse to alphanumerics/lowercase so cosmetic differences (hyphens,
+    spacing, punctuation) don't trip the signature/body name-mismatch check."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _validate_idea(path, start_line, size, name, md_text, metadata):
+    """Warn on internal inconsistencies in a parsed idea:
+
+    * the body's declared size (``# Big Idea``) disagreeing with the
+      ``@idea:<size>`` signature,
+    * the body's name disagreeing with the signature name, and
+    * section headings that look like typos of a standard section.
+
+    All soft warnings — the idea is still ingested; this just surfaces authoring
+    slips the renderer would otherwise pass through silently.
+    """
+    # size: signature vs the "# Big/Small/Huge Idea" body heading
+    for line in md_text.splitlines():
+        bm = _IDEA_BODY_SIZE_RE.match(line.strip())
+        if bm:
+            body_size = bm.group(1).lower()
+            if body_size != size:
+                print(
+                    f"[make_json] warning: {path}:{start_line}: idea '{name}' "
+                    f"signature says @idea:{size} but body heading says "
+                    f"'# {bm.group(1)} Idea' — size mismatch",
+                    file=sys.stderr,
+                )
+            break
+
+    # name: signature vs the body name line (captured into metadata)
+    body_name = (metadata or {}).get("name")
+    if body_name and _normalize_idea_name(body_name) != _normalize_idea_name(name):
+        print(
+            f"[make_json] warning: {path}:{start_line}: idea name mismatch — "
+            f"signature '{name}' vs body '{body_name}'",
+            file=sys.stderr,
+        )
+
+    # sections: flag likely typos (close to a standard section) but leave
+    # genuinely custom sections alone.
+    for line in md_text.splitlines():
+        sm = _IDEA_SECTION_RE.match(line.strip())
+        if not sm:
+            continue
+        section = sm.group(1).strip().lower()
+        if section in KNOWN_IDEA_SECTIONS:
+            continue
+        close = difflib.get_close_matches(section, KNOWN_IDEA_SECTIONS, n=1, cutoff=0.8)
+        if close:
+            print(
+                f"[make_json] warning: {path}:{start_line}: idea '{name}' has "
+                f"section '## {sm.group(1).strip()}' — did you mean "
+                f"'## {close[0].title()}'?",
+                file=sys.stderr,
+            )
+
+
+def _warn_orphaned_ideas(path, lines, consumed_ranges):
+    """Warn about idea bodies with no ``@idea:`` signature (silently dropped).
+
+    This catches the common authoring mistake (e.g. a fully written
+    ``# Small Idea: …`` block missing its ``/* @idea:small … */`` marker) that
+    the extractor would otherwise skip without a trace.
+    """
+    for i, line in enumerate(lines):
+        m = IDEA_BODY_HEADING_RE.match(line.strip())
+        if not m:
+            continue
+        if any(lo <= i <= hi for lo, hi in consumed_ranges):
+            continue  # this body belongs to a matched signature
+        size = m.group(1).lower()
+        print(
+            f"[make_json] warning: {path}:{i + 1}: '{m.group(1)} Idea' body has no "
+            f"matching '@idea:{size} …' signature — it will NOT be ingested",
+            file=sys.stderr,
+        )
+
+
 def extract_ideas_from_file(path):
     ideas = []
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
-    full_text = "".join(lines)
+    consumed_ranges = []
     idx = 0
     while idx < len(lines):
         line = lines[idx].strip()
@@ -665,9 +918,9 @@ def extract_ideas_from_file(path):
             content_lines = []
 
             while start_idx < len(lines):
-                l = lines[start_idx].rstrip()
-                content_lines.append(l)
-                if l.strip().endswith("*/"):
+                content_line = lines[start_idx].rstrip()
+                content_lines.append(content_line)
+                if content_line.strip().endswith("*/"):
                     start_idx += 1
                     break
                 start_idx += 1
@@ -688,6 +941,9 @@ def extract_ideas_from_file(path):
             refs["commits"] = extract_commits(md_text)
             refs["idea_refs"] = extract_idea_refs(md_text)
 
+            _validate_idea(path, idx + 1, size, name.strip(), md_text, metadata)
+
+            consumed_ranges.append((idx, start_idx))
             ideas.append(
                 {
                     "path": str(path),
@@ -706,6 +962,7 @@ def extract_ideas_from_file(path):
         else:
             idx += 1
 
+    _warn_orphaned_ideas(path, lines, consumed_ranges)
     return ideas
 
 
@@ -714,88 +971,92 @@ def extract_ideas_from_file(path):
 NBSP = "\u00a0"
 
 
-def _preserve_indentation(line: str) -> str:
+def _preserve_indentation(line: str, prev_blank: bool = True) -> str:
     """
-    Convert leading regular spaces on a content line to NBSP so that
-    intentional indentation in comment prose survives the HTML/markdown
-    render pipeline.
+    Normalise leading whitespace on a prose line.
 
-    Tabs are converted to 4 NBSP each.  We only touch the leading
-    whitespace — interior spacing is left alone so word-wrap still works.
+    Markdown trims up to 3 leading spaces on paragraph lines, and turns 4+
+    leading spaces into an indented code block — but *only* when the indent
+    starts a new block (i.e. the previous line was blank). An indented line that
+    merely continues a paragraph can't become a code block; its leading spaces
+    are just comment-alignment and markdown collapses them, so we strip them
+    (leaving NBSP there would inject stray gaps mid-paragraph — the doc-comment
+    hanging-indent bug).
 
-    Lines that are markdown structural elements are left completely
-    untouched because remark needs their leading characters to be
-    literal ASCII:
-      - headings          (# …)
-      - list items        (- … / * … / 1. …)
-      - blockquotes       (> …)
-      - horizontal rules  (--- / ***)
+    Only when a deep (>= 4 space) indent begins a fresh block do we fall back to
+    NBSP, preserving the intended visual indent without triggering a code block.
+
+    Structural markdown lines (headings/lists/quotes/rules) are left alone —
+    remark needs their leading characters to be literal ASCII.
     """
     stripped = line.lstrip()
-
-    # Leave structural markdown lines alone
     if re.match(r"^(#{1,6} |[-*>]\s|\d+\.\s|---|\*\*\*)", stripped):
         return line
 
-    # Count and replace leading whitespace
     n_leading = len(line) - len(stripped)
-    if n_leading == 0:
-        return line
+    if n_leading < 4 or not prev_blank:
+        return stripped
 
-    leading_raw = line[:n_leading]
-    # Convert tabs → 4 spaces first, then spaces → NBSP
-    leading_raw = leading_raw.replace("\t", "    ")
-    leading_nbsp = leading_raw.replace(" ", NBSP)
-    return leading_nbsp + stripped
+    leading = line[:n_leading].replace("\t", "    ").replace(" ", NBSP)
+    return leading + stripped
 
 
 def clean_comment_markers(raw: str) -> str:
     lines = raw.splitlines()
     cleaned = []
     in_code_block = False
+    fence_indent = 0
+    prev_blank = True  # start of block behaves like it follows a blank line
 
-    for l in lines:
-        stripped = l.strip()
-
-        if stripped.startswith("```"):
-            in_code_block = not in_code_block
-            cleaned.append(stripped)
-            continue
-
-        if in_code_block:
-            # Inside a fenced code block keep the raw line as-is — the
-            # renderer handles whitespace inside <code> correctly already.
-            cleaned.append(l)
-            continue
-
-        line = l
-        if (
-            line.lstrip().startswith("/*")
-            or line.lstrip().startswith("*")
-            or line.lstrip().startswith("//")
-        ):
+    for line in lines:
+        # Strip the comment margin (/* * //) FIRST, so fenced code blocks are
+        # detected correctly — otherwise the ``` sits behind a "* " margin and
+        # is never recognised as a fence.
+        if line.lstrip().startswith(("/*", "*", "//")):
             line = re.sub(r"^(\s*/\*+|\s*\*+|\s*//+)\s?", "", line)
 
-        # Drop the closing */ marker and lone bare / lines — comment syntax.
+        # Drop closing */ and lone bare / marker lines — comment syntax.
         if re.match(r"^\s*\*/\s*$", line):
             continue
         if re.match(r"^\s*/\s*$", line):
             continue
 
-        # Blank comment line — preserve as empty line for paragraph breaks.
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            if not in_code_block:
+                fence_indent = len(line) - len(line.lstrip())
+            in_code_block = not in_code_block
+            cleaned.append(stripped)  # flush-left fence is always valid
+            prev_blank = False
+            continue
+
+        if in_code_block:
+            # Keep real spaces inside code, but remove the fence's own indent so
+            # the body isn't offset. Never NBSP inside a code block.
+            i = 0
+            while i < fence_indent and i < len(line) and line[i] == " ":
+                i += 1
+            cleaned.append(line[i:])
+            prev_blank = False
+            continue
+
+        # Blank comment line — preserve as an empty line for paragraph breaks.
         if not line.strip():
             cleaned.append("")
+            prev_blank = True
             continue
 
         md_header_match = re.match(r"^(\s*#{1,6})\s*(.+?):\s*(.*)$", line)
         if md_header_match:
             hashes, title, rest = md_header_match.groups()
-            cleaned.append(f"{hashes} {title}")
+            cleaned.append(f"{hashes.strip()} {title}")
             if rest:
-                # Preserve indentation on the rest-of-header body line
-                cleaned.append(_preserve_indentation(rest))
+                # rest continues the header line — never a fresh code block.
+                cleaned.append(_preserve_indentation(rest, prev_blank=False))
         else:
-            cleaned.append(_preserve_indentation(line))
+            cleaned.append(_preserve_indentation(line, prev_blank=prev_blank))
+        prev_blank = False
 
     return "\n".join(cleaned)
 
@@ -820,9 +1081,7 @@ def extract_refs(md_text: str, code_text: str):
         name = match.group(1)
         if name not in IGNORED_KEYWORDS:
             start_idx = match.start()
-            line_number = (
-                char_to_line[start_idx] if start_idx < len(char_to_line) else 1
-            )
+            line_number = char_to_line[start_idx] if start_idx < len(char_to_line) else 1
             functions.append(
                 {
                     "name": name,
@@ -835,9 +1094,7 @@ def extract_refs(md_text: str, code_text: str):
     FILE_RE = re.compile(r"([./\w\-]+?\.(c|h|rs|cpp|txt|md))")
     files = []
     for match in FILE_RE.finditer(combined_text):
-        files.append(
-            {"name": match.group(1), "start_idx": match.start(), "end_idx": match.end()}
-        )
+        files.append({"name": match.group(1), "start_idx": match.start(), "end_idx": match.end()})
 
     return {"functions": functions, "files": files}
 

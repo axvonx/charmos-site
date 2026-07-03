@@ -7,30 +7,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from make_md import (
+    _dir_name_to_slug,
+    assemble_page_text,
+    build_type_table,
     convert_blockquotes_to_asides,
     convert_h2_to_header_with_icon,
-    normalize_type_name,
-    link_type,
-    link_functions_in_md,
-    link_files_in_md,
-    link_commits_in_md,
-    link_bugs_in_md,
     extract_mdx_title,
-    status_to_badge,
-    merge_changelog_and_notes,
-    insert_string_at_line,
     format_enum_as_c_code,
-    format_struct_as_c_code,
     format_function_signature,
+    format_struct_as_c_code,
     generate_github_link_safe,
-    build_type_table,
-    retick_segmentwise,
-    clean_string,
-    _dir_name_to_slug,
+    link_bugs_in_md,
+    link_commits_in_md,
+    link_files_in_md,
+    link_functions_in_md,
+    merge_changelog_and_notes,
+    normalize_type_name,
+    status_to_badge,
 )
 
-
 # ── convert_blockquotes_to_asides ────────────────────────────────────────────
+
 
 class TestConvertBlockquotesToAsides:
     def test_basic_blockquote(self):
@@ -75,6 +72,7 @@ class TestConvertBlockquotesToAsides:
 
 # ── convert_h2_to_header_with_icon ──────────────────────────────────────────
 
+
 class TestConvertH2ToHeaderWithIcon:
     def test_known_header_gets_icon(self):
         md = "## Overview"
@@ -90,9 +88,18 @@ class TestConvertH2ToHeaderWithIcon:
 
     def test_all_known_headers(self):
         headers = [
-            "overview", "background", "summary", "errors", "context",
-            "constraints", "internals", "strategy", "notes", "changelog",
-            "rationale", "api",
+            "overview",
+            "background",
+            "summary",
+            "errors",
+            "context",
+            "constraints",
+            "internals",
+            "strategy",
+            "notes",
+            "changelog",
+            "rationale",
+            "api",
         ]
         for h in headers:
             result = convert_h2_to_header_with_icon(f"## {h.capitalize()}")
@@ -100,6 +107,7 @@ class TestConvertH2ToHeaderWithIcon:
 
 
 # ── normalize_type_name ──────────────────────────────────────────────────────
+
 
 class TestNormalizeTypeName:
     def test_strips_const(self):
@@ -118,26 +126,8 @@ class TestNormalizeTypeName:
         assert normalize_type_name("MyType") == "mytype"
 
 
-# ── link_type ────────────────────────────────────────────────────────────────
-
-class TestLinkType:
-    def test_known_type_links(self):
-        table = {
-            "struct foo": {"file": "test.h", "line": 10},
-        }
-        result = link_type("struct foo", table, True)
-        assert "[`struct foo`]" in result
-
-    def test_unknown_type_ticked(self):
-        result = link_type("unknown_t", {}, True)
-        assert result == "`unknown_t`"
-
-    def test_unknown_type_spaced(self):
-        result = link_type("unknown_t", {}, False)
-        assert result.strip() == "unknown_t"
-
-
 # ── link_functions_in_md ─────────────────────────────────────────────────────
+
 
 class TestLinkFunctionsInMd:
     def test_links_known_function(self):
@@ -152,6 +142,7 @@ class TestLinkFunctionsInMd:
 
 # ── link_files_in_md ─────────────────────────────────────────────────────────
 
+
 class TestLinkFilesInMd:
     def test_links_known_file(self):
         files = {"sched.h": "https://example.com/sched.h"}
@@ -165,6 +156,7 @@ class TestLinkFilesInMd:
 
 # ── link_commits_in_md ───────────────────────────────────────────────────────
 
+
 class TestLinkCommitsInMd:
     def test_links_commit(self):
         result = link_commits_in_md("See commit abc1234")
@@ -174,6 +166,7 @@ class TestLinkCommitsInMd:
 
 # ── link_bugs_in_md ──────────────────────────────────────────────────────────
 
+
 class TestLinkBugsInMd:
     def test_links_bug(self):
         result = link_bugs_in_md("Fixed #42")
@@ -182,6 +175,7 @@ class TestLinkBugsInMd:
 
 
 # ── extract_mdx_title ────────────────────────────────────────────────────────
+
 
 class TestExtractMdxTitle:
     def test_big_idea_inline(self):
@@ -209,6 +203,7 @@ class TestExtractMdxTitle:
 
 # ── status_to_badge ──────────────────────────────────────────────────────────
 
+
 class TestStatusToBadge:
     def test_stable(self):
         result = status_to_badge("STABLE")
@@ -226,6 +221,7 @@ class TestStatusToBadge:
 
 # ── merge_changelog_and_notes ────────────────────────────────────────────────
 
+
 class TestMergeChangelogAndNotes:
     def test_merges_both_sections(self):
         md = "## Changelog\n- v1.0\n- v2.0\n\n## Notes\nSome notes here\n"
@@ -240,20 +236,34 @@ class TestMergeChangelogAndNotes:
         assert "<Tabs>" not in result
 
 
-# ── insert_string_at_line ────────────────────────────────────────────────────
+# ── assemble_page_text ───────────────────────────────────────────────────────
 
-class TestInsertStringAtLine:
-    def test_insert_at_beginning(self):
-        result = insert_string_at_line("line1\nline2", "new", 1)
-        assert result.startswith("new")
 
-    def test_insert_in_middle(self):
-        result = insert_string_at_line("line1\nline2\nline3", "new", 2)
-        lines = result.split("\n")
-        assert lines[1] == "new"
+class TestAssemblePageText:
+    def test_frontmatter_and_imports(self):
+        out = assemble_page_text("My Title", "gummi", "stable", None, "BODY")
+        assert out.startswith('---\ntitle: "My Title"\n')
+        assert 'author: "gummi"' in out
+        assert "import { Badge } from '@astrojs/starlight/components';" in out
+        assert out.rstrip().endswith("BODY")
+        # No sidebar badge when badge is None.
+        assert "sidebar:" not in out
+
+    def test_sidebar_badge_included(self):
+        out = assemble_page_text("T", "a", "s", ("Stable", "success"), "B")
+        assert "sidebar:\n  badge:\n    text: Stable\n    variant: success" in out
+        # Badge lives inside the frontmatter block (before the closing ---).
+        head = out.split("\n\n", 1)[0]
+        assert head.count("---") == 2 and "variant: success" in head
+
+    def test_frontmatter_is_valid_single_block(self):
+        out = assemble_page_text("T", "a", "s", None, "B")
+        # Exactly one opening and one closing fence, imports after.
+        assert out.split("\n\n")[0] == '---\ntitle: "T"\nauthor: "a"\nstatus: "s"\n---'
 
 
 # ── generate_github_link_safe ────────────────────────────────────────────────
+
 
 class TestGenerateGithubLink:
     def test_basic_link(self):
@@ -268,6 +278,7 @@ class TestGenerateGithubLink:
 
 
 # ── format_enum_as_c_code ────────────────────────────────────────────────────
+
 
 class TestFormatEnum:
     def test_basic_enum(self):
@@ -286,6 +297,7 @@ class TestFormatEnum:
 
 
 # ── format_struct_as_c_code ──────────────────────────────────────────────────
+
 
 class TestFormatStruct:
     def test_basic_struct(self):
@@ -308,6 +320,7 @@ class TestFormatStruct:
 
 # ── format_function_signature ────────────────────────────────────────────────
 
+
 class TestFormatFunctionSignature:
     def test_basic_function(self):
         data = {"file": "test.h"}
@@ -327,6 +340,7 @@ class TestFormatFunctionSignature:
 
 
 # ── build_type_table ─────────────────────────────────────────────────────────
+
 
 class TestBuildTypeTable:
     def test_builds_from_structs(self):
@@ -359,27 +373,8 @@ class TestBuildTypeTable:
         assert "enum bar" in table
 
 
-# ── retick_segmentwise ───────────────────────────────────────────────────────
-
-class TestRetickSegmentwise:
-    def test_plain_text(self):
-        result = retick_segmentwise("hello")
-        assert result == "`hello`"
-
-    def test_comma_split(self):
-        result = retick_segmentwise("a,b")
-        assert result == "`a`,`b`"
-
-
-# ── clean_string ─────────────────────────────────────────────────────────────
-
-class TestCleanString:
-    def test_collapses_whitespace(self):
-        result = clean_string("  hello\n  world  ")
-        assert result == "hello world  "
-
-
 # ── _dir_name_to_slug ────────────────────────────────────────────────────────
+
 
 class TestDirNameToSlug:
     def test_basic_slug(self):

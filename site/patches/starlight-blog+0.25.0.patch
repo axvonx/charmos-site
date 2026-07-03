@@ -1,0 +1,27 @@
+diff --git a/node_modules/starlight-blog/components/starlight/ThemeSelect.astro b/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
+index b795a90..3f47409 100644
+--- a/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
++++ b/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
+@@ -1,12 +1,19 @@
+ ---
+-import { getRelativeBlogUrl } from '../../libs/page'
++import { getRelativeBlogUrl, getRelativeUrl, isAnyBlogPage } from '../../libs/page'
+ import { getBlogTitle } from '../../libs/title'
+ 
+-const { locale } = Astro.locals.starlightRoute
++const { id, locale } = Astro.locals.starlightRoute
++
++// On a blog page the header link becomes a way back to the docs; elsewhere it
++// links into the blog. A single header slot that always points the opposite
++// direction from where you currently are.
++const onBlog = isAnyBlogPage(id)
++const href = onBlog ? getRelativeUrl('/') : getRelativeBlogUrl('/', locale)
++const label = onBlog ? 'Docs' : getBlogTitle(locale)
+ ---
+ 
+ <div>
+-  <a href={getRelativeBlogUrl('/', locale)}>{getBlogTitle(locale)}</a>
++  <a href={href}>{label}</a>
+ </div>
+ 
+ <style>

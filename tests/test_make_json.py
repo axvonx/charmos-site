@@ -1,33 +1,183 @@
 #!/usr/bin/env python3
 """Tests for make_json.py — C source parsing into JSON."""
 
-import tempfile
 import os
-import pytest
-from pathlib import Path
 
 # Add parent directory to path so we can import the module
 import sys
+import tempfile
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from make_json import (
-    parse_c_types_and_functions,
-    extract_file_title,
-    extract_metadata,
-    extract_ideas_from_file,
-    extract_commits,
-    extract_idea_refs,
+    clean_comment_markers,
     extract_audience,
     extract_bugs,
-    clean_comment_markers,
-    should_ignore_file,
-    extract_typedef_name,
-    is_function_prototype,
+    extract_commits,
+    extract_file_title,
+    extract_idea_refs,
+    extract_ideas_from_file,
+    extract_metadata,
+    node_raw_text,
     node_text,
+    parse_c_types_and_functions,
+    should_ignore_file,
 )
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+NBSP = " "
+
+
+# ── idea markdown cleaning (stress tests) ────────────────────────────────────
+
+
+class TestCleanCommentMarkersRendering:
+    def _clean(self, lines):
+        return clean_comment_markers("\n".join(lines))
+
+    def test_code_fence_behind_comment_margin_survives(self):
+        # The fence sits behind a "* " comment margin — it must still be a fence.
+        out = self._clean(
+            [
+                " * ## API:",
+                " *   ```c",
+                " *   enum irql old = irql_raise(IRQL_DISPATCH_LEVEL);",
+                " *   irql_lower(old);",
+                " *   ```",
+            ]
+        )
+        assert out.count("```") == 2
+        # fence flush-left (valid markdown), code dedented, no NBSP
+        assert "\n```c\n" in out
+        assert "enum irql old = irql_raise(IRQL_DISPATCH_LEVEL);" in out
+        assert NBSP not in out
+
+    def test_wrapped_paragraph_has_no_nbsp_gaps(self):
+        out = self._clean(
+            [
+                " *   IRQLs were introduced as the preemption/interrupt control",
+                " *   of this kernel because of the structure and strict rules.",
+            ]
+        )
+        assert NBSP not in out
+        # both lines flush-left so markdown joins them into one clean paragraph
+        assert out == (
+            "IRQLs were introduced as the preemption/interrupt control\n"
+            "of this kernel because of the structure and strict rules."
+        )
+
+    def test_blank_lines_inside_code_block_preserved(self):
+        out = self._clean(
+            [
+                " *   ```c",
+                " *   a();",
+                " *",
+                " *   b();",
+                " *   ```",
+            ]
+        )
+        assert "a();\n\nb();" in out
+
+    def test_list_items_preserved(self):
+        out = self._clean([" * ## Notes:", " * - first", " * - second"])
+        assert "- first" in out and "- second" in out
+
+    def test_deep_indentation_uses_nbsp_not_code_block(self):
+        # 4+ leading spaces would become an indented code block in markdown;
+        # keep it as visual indent via NBSP instead.
+        out = self._clean([" *      deeply indented note"])
+        assert out.startswith(NBSP)
+
+    def test_hanging_indent_continuation_has_no_nbsp(self):
+        # A wrapped prose line indented 4 spaces (doc-comment hanging indent)
+        # continues the paragraph — it can't start an indented code block, so
+        # its leading spaces must be stripped, not turned into NBSP gaps.
+        out = self._clean(
+            [
+                " * IRQLs play a major role in the preemption and interrupt",
+                " *     control mechanisms of this kernel. Thus this matters.",
+            ]
+        )
+        assert NBSP not in out
+        assert out == (
+            "IRQLs play a major role in the preemption and interrupt\n"
+            "control mechanisms of this kernel. Thus this matters."
+        )
+
+    def test_indented_block_after_blank_still_nbsp(self):
+        # After a blank line, a 4-space indent *can* start a code block, so the
+        # NBSP guard must still fire there.
+        out = self._clean(
+            [
+                " * intro paragraph",
+                " *",
+                " *     indented block after a blank line",
+            ]
+        )
+        assert NBSP in out
+
+
+# ── idea validation (orphaned bodies) ────────────────────────────────────────
+
+
+class TestIdeaValidation:
+    def test_orphaned_idea_body_warns(self, capsys):
+        # idea_bad.h has a "# Small Idea:" body but no @idea: signature.
+        ideas = extract_ideas_from_file(str(FIXTURES / "idea_bad.h"))
+        assert ideas == []  # silently dropped from ingestion …
+        err = capsys.readouterr().err
+        assert "has no matching '@idea:small" in err  # … but now loudly warned
+
+    def test_well_formed_idea_does_not_warn(self, capsys):
+        ideas = extract_ideas_from_file(str(FIXTURES / "idea_good.h"))
+        assert len(ideas) == 1
+        assert ideas[0]["name"] == "Widget Lifecycle"
+        assert capsys.readouterr().err == ""
+
+    def test_size_mismatch_warns(self, capsys):
+        # signature @idea:big but body "# Small Idea" → still ingested, warned.
+        ideas = extract_ideas_from_file(str(FIXTURES / "idea_mismatch.h"))
+        assert len(ideas) == 1
+        err = capsys.readouterr().err
+        assert "size mismatch" in err
+
+    def test_section_typo_warns_custom_section_does_not(self, capsys):
+        extract_ideas_from_file(str(FIXTURES / "idea_mismatch.h"))
+        err = capsys.readouterr().err
+        # "Overveiw" is close to "Overview" → typo warning
+        assert "Overveiw" in err and "Overview" in err
+        # "Bootstage Exception" is genuinely custom → no typo warning for it
+        assert "Bootstage Exception" not in err
+
+    def test_name_mismatch_warns(self, capsys):
+        ideas = extract_ideas_from_file(str(FIXTURES / "idea_namemismatch.h"))
+        assert len(ideas) == 1
+        err = capsys.readouterr().err
+        assert "name mismatch" in err
+
+    def test_cosmetic_name_difference_does_not_warn(self, capsys):
+        # "Real-time" vs "Realtime" differ only in punctuation → no false warning.
+        from make_json import _normalize_idea_name
+
+        assert _normalize_idea_name("Real-time scheduler") == _normalize_idea_name(
+            "Realtime scheduler"
+        )
+
+    def test_node_raw_text_preserves_newlines(self):
+        code = b"a\n  b"
+
+        class N:
+            start_byte, end_byte = 0, len(code)
+
+        assert node_raw_text(N(), code) == "a\n  b"
+        assert node_text(N(), code) == "a b"  # the collapsing variant
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def parse_code(code: str) -> dict:
     """Write code to a temp file, parse it, and return the result."""
@@ -41,6 +191,7 @@ def parse_code(code: str) -> dict:
 
 
 # ── Function parsing ─────────────────────────────────────────────────────────
+
 
 class TestFunctionDefinitions:
     def test_simple_function_definition(self):
@@ -142,6 +293,7 @@ int foo(int x) { return x; }
 
 # ── Struct parsing ───────────────────────────────────────────────────────────
 
+
 class TestStructParsing:
     def test_simple_struct(self):
         code = "struct point { int x; int y; };"
@@ -186,6 +338,7 @@ struct outer {
 
 # ── Enum parsing ─────────────────────────────────────────────────────────────
 
+
 class TestEnumParsing:
     def test_simple_enum(self):
         code = "enum color { RED, GREEN, BLUE };"
@@ -215,6 +368,7 @@ class TestEnumParsing:
 
 
 # ── Typedef parsing ──────────────────────────────────────────────────────────
+
 
 class TestTypedefParsing:
     def test_simple_typedef(self):
@@ -253,6 +407,7 @@ class TestTypedefParsing:
 
 # ── #define parsing ──────────────────────────────────────────────────────────
 
+
 class TestDefines:
     def test_simple_define(self):
         code = "#define MAX_SIZE 1024"
@@ -281,6 +436,7 @@ class TestDefines:
 
 # ── extract_file_title ───────────────────────────────────────────────────────
 
+
 class TestExtractFileTitle:
     def test_basic_title(self):
         assert extract_file_title("/* @title: My File */") == "My File"
@@ -296,6 +452,7 @@ class TestExtractFileTitle:
 
 
 # ── extract_metadata ────────────────────────────────────────────────────────
+
 
 class TestExtractMetadata:
     def test_idea_with_status(self):
@@ -318,6 +475,7 @@ class TestExtractMetadata:
 
 # ── extract_audience ─────────────────────────────────────────────────────────
 
+
 class TestExtractAudience:
     def test_audience_header(self):
         md = "# Audience\nKernel developers\nSome content"
@@ -334,6 +492,7 @@ class TestExtractAudience:
 
 # ── extract_commits ──────────────────────────────────────────────────────────
 
+
 class TestExtractCommits:
     def test_finds_commits(self):
         md = "commit abc1234\ncommit 1234567890abcdef"
@@ -347,6 +506,7 @@ class TestExtractCommits:
 
 # ── extract_idea_refs ────────────────────────────────────────────────────────
 
+
 class TestExtractIdeaRefs:
     def test_finds_refs(self):
         text = ']: "some idea ref"'
@@ -356,6 +516,7 @@ class TestExtractIdeaRefs:
 
 
 # ── extract_bugs ─────────────────────────────────────────────────────────────
+
 
 class TestExtractBugs:
     def test_finds_bugs_in_section(self):
@@ -373,6 +534,7 @@ class TestExtractBugs:
 
 
 # ── clean_comment_markers ────────────────────────────────────────────────────
+
 
 class TestCleanCommentMarkers:
     def test_strips_c_comment_markers(self):
@@ -394,6 +556,7 @@ class TestCleanCommentMarkers:
 
 # ── should_ignore_file ───────────────────────────────────────────────────────
 
+
 class TestShouldIgnoreFile:
     def test_ignores_uacpi(self):
         assert should_ignore_file(Path("include/uACPI/test.h")) is True
@@ -407,6 +570,7 @@ class TestShouldIgnoreFile:
 
 # ── extract_ideas_from_file ──────────────────────────────────────────────────
 
+
 class TestExtractIdeas:
     def test_extracts_idea(self):
         code = """\
@@ -418,9 +582,7 @@ class TestExtractIdeas:
  * Some description here.
  */
 """
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".h", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".h", delete=False) as f:
             f.write(code)
             tmp = f.name
         try:
@@ -433,9 +595,7 @@ class TestExtractIdeas:
 
     def test_no_ideas(self):
         code = "int x = 5;\n"
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".h", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".h", delete=False) as f:
             f.write(code)
             tmp = f.name
         try:
@@ -446,6 +606,7 @@ class TestExtractIdeas:
 
 
 # ── Mixed content: prototypes + structs + ideas ──────────────────────────────
+
 
 class TestMixedContent:
     def test_header_with_everything(self):
@@ -482,3 +643,91 @@ struct config *get_default(void);
         assert len(result["types"]["enums"]) == 1
         assert len(result["types"]["typedefs"]) == 2
         assert len(result["defines"]) == 1
+
+
+class TestGlobalVariables:
+    def test_extern_and_file_scope_variables(self):
+        code = """\
+extern int global_counter;
+extern struct spinlock big_lock;
+static const char *g_name;
+int uninit_global;
+extern unsigned long flags[4];
+void do_thing(int x);
+struct foo { int a; };
+"""
+        result = parse_code(code)
+        globs = {g["name"]: g for g in result["types"]["globals"]}
+        # all five variables captured …
+        assert set(globs) == {
+            "global_counter",
+            "big_lock",
+            "g_name",
+            "uninit_global",
+            "flags",
+        }
+        # … with storage class + type preserved (type feeds reference links)
+        assert globs["global_counter"]["storage"] == "extern"
+        assert globs["big_lock"]["type"] == "struct spinlock"
+        assert globs["uninit_global"]["storage"] == ""
+        # prototypes and struct defs are NOT misclassified as variables
+        assert [f["name"] for f in result["functions"]] == ["do_thing"]
+        assert [s["name"] for s in result["types"]["structs"]] == ["foo"]
+
+    def test_no_false_globals_from_typedefs(self):
+        # A typedef is not a variable declaration.
+        result = parse_code("typedef int myint;\nextern myint counter;")
+        names = {g["name"] for g in result["types"]["globals"]}
+        assert names == {"counter"}
+
+    def test_macro_decorated_declarations_are_rejected(self):
+        # Macro-annotated / macro-call declarations tree-sitter mis-parses must
+        # not leak in as bogus "variables".
+        code = """\
+extern int real_global;
+LIMINE_DEPRECATED some_deprecated;
+struct LIMINE_MP(mp_info);
+LIMINE_IGNORE_START struct foo { int x; };
+"""
+        result = parse_code(code)
+        names = {g["name"] for g in result["types"]["globals"]}
+        assert names == {"real_global"}
+
+    def test_macro_body_declarations_are_not_globals(self):
+        # tree-sitter only parses the first line or two of a complex
+        # function-like macro body, then leaks the remaining statements out as
+        # file-scope declarations. Those (e.g. the `auto __x = y;` inside
+        # hashmap_insert) must not be recorded as globals.
+        code = """\
+extern int real_global;
+
+#define hashmap_insert(map, key, key_length)                                   \\
+    ({                                                                         \\
+        auto __key = key;                                                      \\
+        auto __key_len = key_length;                                           \\
+        auto __map = map;                                                      \\
+        uint64_t __hash = hash(__key, __key_len);                             \\
+        uint64_t __index = __hash % __map->capacity;                          \\
+    })
+
+extern int another_global;
+"""
+        result = parse_code(code)
+        names = {g["name"] for g in result["types"]["globals"]}
+        assert names == {"real_global", "another_global"}
+        for phantom in ("__key", "__key_len", "__map", "__hash", "__index"):
+            assert phantom not in names
+
+    def test_struct_with_trailing_attribute_macro_not_a_global(self):
+        # `struct X { … } __packed;` — the trailing macro is an attribute, not a
+        # variable; the struct itself is still recorded.
+        code = """\
+extern char __skernel[];
+struct packed_thing { int a; } __packed;
+extern struct info hpet_base;
+"""
+        result = parse_code(code)
+        names = {g["name"] for g in result["types"]["globals"]}
+        assert names == {"__skernel", "hpet_base"}
+        assert "__packed" not in names
+        assert [s["name"] for s in result["types"]["structs"]] == ["packed_thing"]

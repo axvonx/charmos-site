@@ -1,2 +1,7 @@
+# Runtime dependencies for the docs build pipeline, installed by CI.
+# Mirrors [project.dependencies] in pyproject.toml — keep the two in sync.
 tree_sitter==0.25.2
 tree_sitter_language_pack==0.11.0
+# libclang provides the clang.cindex Python bindings + a bundled libclang shared
+# library, used by index_clang.py to build the clang-accurate symbol index.
+libclang==18.1.1

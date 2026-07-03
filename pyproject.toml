@@ -1,0 +1,52 @@
+# Project + tooling configuration for the charmOS docs build pipeline.
+#
+# The pipeline is a set of flat, script-invoked modules at the repo root
+# (generate.py orchestrates make_json.py / make_md.py / make_cmdline.py /
+# index_clang.py / sourceblock.py), not an installable package — so there is no
+# [build-system] table. This file exists to declare metadata + dependencies in
+# one place and to configure the dev tooling (ruff, black, pytest).
+#
+# Runtime dependencies are ALSO pinned in requirements.txt, which CI installs
+# verbatim (`pip install -r requirements.txt`). Keep the two in sync.
+
+[project]
+name = "charmos-docs-pipeline"
+version = "0.1.0"
+description = "Build pipeline that generates the charmOS documentation site from C sources."
+readme = "AUTHORING.md"
+requires-python = ">=3.11"
+dependencies = [
+    "tree_sitter==0.25.2",
+    "tree_sitter_language_pack==0.11.0",
+    # libclang provides the clang.cindex bindings + bundled libclang shared
+    # library used by index_clang.py to build the clang-accurate symbol index.
+    "libclang==18.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "black>=24",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# F = pyflakes (unused imports/vars, redefinitions), E/W = pycodestyle,
+# I = isort (import ordering), UP = pyupgrade.
+select = ["F", "E", "W", "I", "UP"]
+# E501 (line too long) is handled by black; a few long string/comment lines are
+# intentional. Ambiguity of the name `l` is avoided by convention, not enforced.
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The pipeline modules live at the repo root; make them importable from tests.
+pythonpath = ["."]

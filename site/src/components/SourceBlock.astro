@@ -1,0 +1,115 @@
+---
+/**
+ * SourceBlock — renders C code with clang-resolved, clickable symbols.
+ *
+ * The docs pipeline (sourceblock.py) tokenizes C with tree-sitter and resolves
+ * each identifier against the clang-accurate symbol index, emitting an array of
+ * segments. Identifiers that resolve to a definition carry an `href` (into the
+ * source browser or an internal anchor), giving rustdoc-style "click a symbol →
+ * jump to its definition" without relying on Expressive Code (which cannot add
+ * links to code blocks).
+ */
+export interface Segment {
+  text: string;
+  cls: string;
+  href?: string;
+  symbol?: string;
+}
+
+interface Props {
+  segments: Segment[];
+  title?: string;
+  /** Anchor id so cross-page links (e.g. #struct-thread) can target this block. */
+  id?: string;
+  /** Right-hand-side link to the symbol's definition (source browser / GitHub). */
+  defHref?: string;
+}
+
+const { segments, title, id, defHref } = Astro.props;
+---
+
+<figure class="sourceblock" id={id}>
+  {(title || defHref) && (
+    <figcaption class="sourceblock__title">
+      {title && <span class="sourceblock__label">{title}</span>}
+      {defHref && (
+        <a class="sourceblock__def" href={defHref} title="Go to definition">
+          definition ↗
+        </a>
+      )}
+    </figcaption>
+  )}
+  <pre class="sourceblock__pre"><code>{
+    segments.map((seg) =>
+      seg.href ? (
+        <a
+          class={`tok tok-${seg.cls} tok-link`}
+          href={seg.href}
+          title={seg.symbol ? `Go to definition of ${seg.symbol}` : undefined}
+          >{seg.text}</a>
+      ) : (
+        <span class={`tok tok-${seg.cls}`}>{seg.text}</span>
+      )
+    )
+  }</code></pre>
+</figure>
+
+<style>
+  .sourceblock {
+    margin: 1rem 0;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--sl-color-black);
+  }
+  .sourceblock__title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: var(--sl-text-xs);
+    font-family: var(--sl-font-mono, monospace);
+    padding: 0.35rem 0.75rem;
+    color: var(--sl-color-gray-2);
+    background: var(--sl-color-gray-6, rgba(255, 255, 255, 0.04));
+    border-bottom: 1px solid var(--sl-color-gray-5);
+  }
+  .sourceblock__def {
+    margin-left: auto;
+    white-space: nowrap;
+    color: var(--sl-color-accent-high);
+    text-decoration: none;
+  }
+  .sourceblock__def:hover { text-decoration: underline; }
+  /* Offset the anchor so cross-page jumps aren't hidden under the header. */
+  .sourceblock { scroll-margin-top: 5rem; }
+  .sourceblock__pre {
+    margin: 0;
+    padding: 0.75rem 1rem;
+    overflow-x: auto;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-size: var(--sl-text-code, 0.9em);
+    line-height: 1.6;
+  }
+  .tok-keyword { color: var(--sl-color-accent-high); font-weight: 600; }
+  .tok-type    { color: hsl(190, 60%, 60%); }
+  .tok-ident   { color: var(--sl-color-white); }
+  .tok-field   { color: hsl(210, 40%, 72%); }
+  .tok-number  { color: hsl(28, 65%, 62%); }
+  .tok-string  { color: hsl(95, 40%, 62%); }
+  .tok-comment { color: var(--sl-color-gray-3); font-style: italic; }
+  .tok-punct   { color: var(--sl-color-gray-2); }
+
+  /* Resolved symbols: subtle affordance, strong on hover. */
+  .tok-link {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px dotted var(--sl-color-gray-4);
+    cursor: pointer;
+  }
+  .tok-link:hover {
+    color: var(--sl-color-accent-high);
+    border-bottom-color: var(--sl-color-accent);
+    background: color-mix(in srgb, var(--sl-color-accent) 12%, transparent);
+  }
+</style>
