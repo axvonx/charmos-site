@@ -1,8 +1,8 @@
 diff --git a/node_modules/starlight-blog/components/starlight/ThemeSelect.astro b/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
-index b795a90..686bec4 100644
+index b795a90..a8eab08 100644
 --- a/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
 +++ b/node_modules/starlight-blog/components/starlight/ThemeSelect.astro
-@@ -1,30 +1,65 @@
+@@ -1,30 +1,327 @@
  ---
 -import { getRelativeBlogUrl } from '../../libs/page'
 +import { getRelativeBlogUrl, getRelativeUrl, isAnyBlogPage } from '../../libs/page'
@@ -38,10 +38,47 @@ index b795a90..686bec4 100644
 +  </a>
  </div>
  
++{/*
++  A custom theme picker replacing Starlight's native <select>: the native popup
++  renders in the OS layer and can't be CSS-themed, so its option list ignored the
++  evergreen palette. This is a fully styleable listbox — trigger + popup — driven
++  by the same `starlight-theme` localStorage key and `data-theme` attribute
++  Starlight's ThemeProvider uses, so it stays in step with the FOUC guard already
++  inlined in <head>. Rendered instead of <Default> from the override.
++*/}
++<starlight-charm-theme-select class="charm-theme-select">
++  <button
++    type="button"
++    class="charm-theme-trigger"
++    aria-haspopup="listbox"
++    aria-expanded="false"
++    aria-label={Astro.locals.t('themeSelect.accessibleLabel')}
++  >
++    <span class="charm-theme-current" data-theme-icon aria-hidden="true"></span>
++    <span class="charm-theme-label" data-theme-label>Auto</span>
++    <svg class="charm-theme-caret" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
++  </button>
++  <ul class="charm-theme-menu" role="listbox" tabindex="-1" hidden>
++    <li class="charm-theme-option" role="option" data-value="auto" tabindex="-1">
++      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
++      <span>Auto</span>
++    </li>
++    <li class="charm-theme-option" role="option" data-value="light" tabindex="-1">
++      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
++      <span>Light</span>
++    </li>
++    <li class="charm-theme-option" role="option" data-value="dark" tabindex="-1">
++      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
++      <span>Dark</span>
++    </li>
++  </ul>
++</starlight-charm-theme-select>
++
  <style>
+-  div {
 +  /* Icon-only links sized + coloured to match Starlight's social icons
 +     (GitHub/RSS): same 16px glyph, accent colour, 0.5em hit-padding, hover fade. */
-   div {
++  .starlight-blog-nav {
      border-inline-end: 1px solid var(--sl-color-gray-5);
      display: none;
 -    padding-inline-end: 1rem;
@@ -50,13 +87,15 @@ index b795a90..686bec4 100644
    }
  
    @media (min-width: 50rem) {
-     div {
+-    div {
++    .starlight-blog-nav {
        display: flex;
 +      align-items: center;
      }
    }
  
-   a {
+-  a {
++  .starlight-blog-nav a {
 +    display: inline-flex;
 +    align-items: center;
      color: var(--sl-color-text-accent);
@@ -66,11 +105,257 @@ index b795a90..686bec4 100644
 +    margin: -0.5em;
 +  }
 +
-+  a:hover {
++  .starlight-blog-nav a:hover {
 +    opacity: 0.66;
 +  }
 +
-+  svg {
++  .starlight-blog-nav svg {
 +    flex: none;
++  }
++
++  /* -------- Custom theme picker (themeable replacement for <select>) -------- */
++  .charm-theme-select {
++    position: relative;
++    display: inline-flex;
++    align-items: center;
++    margin-inline-start: 0.6rem;
++  }
++
++  .charm-theme-trigger {
++    display: inline-flex;
++    align-items: center;
++    gap: 0.4rem;
++    padding: 0.35rem 0.55rem;
++    border: 1px solid transparent;
++    border-radius: var(--sl-border-radius-md, 8px);
++    background: transparent;
++    color: var(--sl-color-text-accent);
++    font-size: var(--sl-text-xs);
++    line-height: 1;
++    cursor: pointer;
++    transition: border-color 0.15s, background-color 0.15s, opacity 0.15s;
++  }
++
++  .charm-theme-trigger:hover {
++    opacity: 0.75;
++  }
++
++  .charm-theme-trigger[aria-expanded='true'] {
++    border-color: var(--sl-color-gray-5);
++    background: var(--sl-color-bg-nav, var(--sl-color-bg));
++    opacity: 1;
++  }
++
++  .charm-theme-current {
++    display: inline-flex;
++    align-items: center;
++  }
++
++  .charm-theme-current svg {
++    display: block;
++  }
++
++  .charm-theme-caret {
++    flex: none;
++    transition: transform 0.15s;
++  }
++
++  .charm-theme-trigger[aria-expanded='true'] .charm-theme-caret {
++    transform: rotate(180deg);
++  }
++
++  .charm-theme-menu {
++    position: absolute;
++    inset-block-start: calc(100% + 0.4rem);
++    inset-inline-end: 0;
++    z-index: 50;
++    min-width: 8.5rem;
++    margin: 0;
++    padding: 0.3rem;
++    list-style: none;
++    border: 1px solid var(--sl-color-gray-5);
++    border-radius: var(--sl-border-radius-md, 8px);
++    background: var(--sl-color-bg-nav, var(--sl-color-bg));
++    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
++  }
++
++  .charm-theme-menu[hidden] {
++    display: none;
++  }
++
++  .charm-theme-option {
++    display: inline-flex;
++    align-items: center;
++    width: 100%;
++    box-sizing: border-box;
++    gap: 0.55rem;
++    padding: 0.4rem 0.55rem;
++    border-radius: var(--sl-border-radius-sm, 4px);
++    color: var(--sl-color-white);
++    font-size: var(--sl-text-sm);
++    cursor: pointer;
++    user-select: none;
++  }
++
++  .charm-theme-option svg {
++    flex: none;
++    color: var(--sl-color-gray-3);
++  }
++
++  .charm-theme-option:hover,
++  .charm-theme-option:focus-visible,
++  .charm-theme-option.is-active {
++    background: var(--sl-color-accent-low);
++    outline: none;
++  }
++
++  .charm-theme-option:hover svg,
++  .charm-theme-option:focus-visible svg,
++  .charm-theme-option.is-active svg {
++    color: var(--sl-color-accent-high);
++  }
++
++  .charm-theme-option[aria-selected='true'] {
++    color: var(--sl-color-text-accent);
++    font-weight: 600;
    }
  </style>
++
++<script>
++  type Theme = 'auto' | 'dark' | 'light';
++
++  const storageKey = 'starlight-theme';
++
++  function parseTheme(theme: unknown): Theme {
++    return theme === 'auto' || theme === 'dark' || theme === 'light' ? theme : 'auto';
++  }
++
++  function loadTheme(): Theme {
++    return parseTheme(typeof localStorage !== 'undefined' && localStorage.getItem(storageKey));
++  }
++
++  function storeTheme(theme: Theme): void {
++    if (typeof localStorage !== 'undefined') {
++      localStorage.setItem(storageKey, theme === 'light' || theme === 'dark' ? theme : '');
++    }
++  }
++
++  function getPreferredColorScheme(): Theme {
++    return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
++  }
++
++  function applyTheme(theme: Theme): void {
++    document.documentElement.dataset['theme'] = theme === 'auto' ? getPreferredColorScheme() : theme;
++    storeTheme(theme);
++    // Keep any native Starlight pickers (other breakpoints/fallbacks) in sync.
++    (window as any).StarlightThemeProvider?.updatePickers?.(theme);
++  }
++
++  const labels: Record<Theme, string> = { auto: 'Auto', light: 'Light', dark: 'Dark' };
++
++  customElements.define(
++    'starlight-charm-theme-select',
++    class StarlightCharmThemeSelect extends HTMLElement {
++      #trigger = this.querySelector<HTMLButtonElement>('.charm-theme-trigger')!;
++      #menu = this.querySelector<HTMLUListElement>('.charm-theme-menu')!;
++      #options = [...this.querySelectorAll<HTMLLIElement>('.charm-theme-option')];
++      #iconSlot = this.querySelector<HTMLElement>('[data-theme-icon]')!;
++      #labelSlot = this.querySelector<HTMLElement>('[data-theme-label]')!;
++
++      constructor() {
++        super();
++        const current = loadTheme();
++        applyTheme(current);
++        this.#reflect(current);
++
++        this.#trigger.addEventListener('click', () => this.#toggle());
++
++        for (const option of this.#options) {
++          option.addEventListener('click', () => {
++            const value = parseTheme(option.dataset['value']);
++            applyTheme(value);
++            this.#reflect(value);
++            this.#close(true);
++          });
++        }
++
++        // Dismissal: outside click and Escape; basic arrow-key navigation.
++        document.addEventListener('click', (e) => {
++          if (!this.contains(e.target as Node)) this.#close();
++        });
++        this.addEventListener('keydown', (e) => {
++          if (e.key === 'Escape') {
++            this.#close(true);
++          } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
++            e.preventDefault();
++            this.#move(e.key === 'ArrowDown' ? 1 : -1);
++          } else if ((e.key === 'Enter' || e.key === ' ') && document.activeElement instanceof HTMLLIElement) {
++            e.preventDefault();
++            (document.activeElement as HTMLLIElement).click();
++          }
++        });
++
++        // React to system scheme changes while in 'auto'.
++        matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
++          if (loadTheme() === 'auto') applyTheme('auto');
++        });
++      }
++
++      #reflect(theme: Theme) {
++        const active = this.#options.find((o) => o.dataset['value'] === theme) ?? this.#options[0]!;
++        this.#iconSlot.innerHTML = active.querySelector('svg')?.outerHTML ?? '';
++        this.#labelSlot.textContent = labels[theme];
++        for (const option of this.#options) {
++          const selected = option.dataset['value'] === theme;
++          option.setAttribute('aria-selected', String(selected));
++          option.classList.toggle('is-active', selected);
++        }
++      }
++
++      #toggle() {
++        this.#menu.hidden ? this.#open() : this.#close();
++      }
++
++      #open() {
++        this.#menu.hidden = false;
++        this.#trigger.setAttribute('aria-expanded', 'true');
++        const selected = this.#options.find((o) => o.getAttribute('aria-selected') === 'true') ?? this.#options[0]!;
++        selected.focus();
++      }
++
++      #close(returnFocus = false) {
++        if (this.#menu.hidden) return;
++        this.#menu.hidden = true;
++        this.#trigger.setAttribute('aria-expanded', 'false');
++        if (returnFocus) this.#trigger.focus();
++      }
++
++      #move(delta: number) {
++        if (this.#menu.hidden) this.#open();
++        const focused = this.#options.findIndex((o) => o === document.activeElement);
++        const next = (focused + delta + this.#options.length) % this.#options.length;
++        this.#options[next]!.focus();
++      }
++    },
++  );
++</script>
+diff --git a/node_modules/starlight-blog/overrides/ThemeSelect.astro b/node_modules/starlight-blog/overrides/ThemeSelect.astro
+index d5f2fd8..4ed3bab 100644
+--- a/node_modules/starlight-blog/overrides/ThemeSelect.astro
++++ b/node_modules/starlight-blog/overrides/ThemeSelect.astro
+@@ -1,8 +1,12 @@
+ ---
+-import Default from '@astrojs/starlight/components/ThemeSelect.astro'
+-
+ import StarlightBlogThemeSelect from '../components/starlight/ThemeSelect.astro'
+ ---
+ 
++{/*
++  We intentionally do NOT render Starlight's <Default> ThemeSelect here: it emits
++  a native <select> whose popup renders in the OS layer and can't be themed.
++  StarlightBlogThemeSelect now owns the header cluster — the Blog/Code links plus
++  a fully-styleable custom theme picker that speaks the same localStorage /
++  data-theme protocol.
++*/}
+ <StarlightBlogThemeSelect><slot /></StarlightBlogThemeSelect>
+-<Default><slot /></Default>

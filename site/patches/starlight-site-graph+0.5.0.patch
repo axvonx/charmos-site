@@ -1,3 +1,143 @@
+diff --git a/node_modules/starlight-site-graph/components/backlinks/PageBacklinks.astro b/node_modules/starlight-site-graph/components/backlinks/PageBacklinks.astro
+index 67f5953..3dc49fe 100644
+--- a/node_modules/starlight-site-graph/components/backlinks/PageBacklinks.astro
++++ b/node_modules/starlight-site-graph/components/backlinks/PageBacklinks.astro
+@@ -7,7 +7,6 @@ import astroConfig from 'virtual:starlight-site-graph/astro-config';
+ 
+ import { ensureTrailingSlash, stripSlashes } from '../util';
+ import {firstMatchingPattern} from "../../sitemap/util";
+-import Backlinks from './Backlinks.astro';
+ 
+ interface Props {
+ 	slug?: string;
+@@ -50,18 +49,38 @@ if (showBacklinks === undefined) {
+ 
+ ---
+ 
+-{showBacklinks && backlinks.length > 0 &&
+-	<div class:list={className ?? ""} data-slug={slugWithBase}>
++{/*
++  The build-time `sitemap` here only knows links the *markdown* scanner found at
++  `astro:config:setup`; our inbound links live in rendered <SourceBlock>/rehype
++  HTML it can't see, so `backlinks` is almost always empty at render. The full,
++  HTML-crawled sitemap is written to `dist/sitegraph/sitemap.json` in
++  `astro:build:done` — so we always render the container (mounting an empty
++  `.slsg-backlinks` list) and let the client script below re-fill it from that
++  complete sitemap, revealing the panel only when there are real backlinks. The
++  panel starts hidden when the build-time list is empty to avoid a flash of an
++  empty "Backlinks" heading before hydration.
++*/}
++{showBacklinks &&
++	<div class:list={className ?? ""} data-slug={slugWithBase} data-slsg-backlinks-panel hidden={backlinks.length === 0}>
+ 		<slot name="title"/>
+-		<Backlinks backlinks={backlinks} sitemap={sitemap} />
++		<ul class="slsg-backlinks" style="--depth: 0;">
++			{backlinks.map((link) => (
++				<li style="--depth: 0;">
++					<a href={"/" + link} style="--depth: 0;" target="_self" class="slsg-backlink">
++						<span style="--depth: 0;">{sitemap![link]?.title ?? link}</span>
++					</a>
++				</li>
++			))}
++		</ul>
+ 	</div>
+ }
+ 
+ <script>
+-	// This code dynamically loads in backlinks when the user loads a page
+-	// The sitemap is only 'complete' at build time, but the backlinks above are generated _before_ the full sitemap is known
+-	//    resulting in only links from markdown content being included
+-	// TODO: Alternative solution: build twice (once to get the full sitemap, then once more to place the backlinks)
++	// Backlinks are re-derived on the client from the complete, HTML-crawled
++	// sitemap (`sitegraph/sitemap.json`), because the build-time sitemap the
++	// server rendered from only saw markdown links (see the note above). The
++	// server always mounts an (often empty, hidden) panel container so this can
++	// populate and reveal it.
+ 	window.addEventListener('DOMContentLoaded', async () => {
+ 		if (import.meta.env.PROD) {
+ 			let base_url = import.meta.env.BASE_URL;
+@@ -71,36 +90,53 @@ if (showBacklinks === undefined) {
+ 
+ 			const onIdle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1));
+ 			onIdle(async () => {
+-				const sitemap = await (await fetch(base_url + 'sitegraph/sitemap.json')).json();
+-				const backlinks_container = document.body.getElementsByClassName('slsg-backlinks');
+-				if (backlinks_container.length > 0) {
+-					const container = backlinks_container[0]!;
+-					const slug = container.parentElement?.getAttribute('data-slug') ?? '';
+-					const entry = sitemap[slug];
+-					if (entry?.backlinks) {
+-						container.innerHTML = '';
+-						for (const link of entry.backlinks) {
+-							const li = document.createElement('li');
+-							li.style.setProperty('--depth', '0');
+-
+-							const a = document.createElement('a');
+-							a.href = '/' + link;
+-							a.style.setProperty('--depth', '0');
+-							a.target = '_self';
+-							a.className = 'slsg-backlink';
+-
+-							const span = document.createElement('span');
+-							span.style.setProperty('--depth', '0');
+-							span.textContent = sitemap[link]?.title;
+-
+-							a.appendChild(span);
+-							li.appendChild(a);
+-							container.appendChild(li);
+-						}
+-
+-					}
++				const panel = document.querySelector('[data-slsg-backlinks-panel]') as HTMLElement | null;
++				if (!panel) return;
++				const container = panel.querySelector('.slsg-backlinks');
++				if (!container) return;
++
++				let sitemap: Record<string, any>;
++				try {
++					sitemap = await (await fetch(base_url + 'sitegraph/sitemap.json')).json();
++				} catch {
++					return;
+ 				}
+ 
++				const slug = panel.getAttribute('data-slug') ?? '';
++				const entry = sitemap[slug];
++				const raw: string[] = entry?.backlinks ?? [];
++				if (!raw.length) {
++					panel.hidden = true;
++					return;
++				}
++
++				// De-dupe and sort by page title for a stable, readable list.
++				const seen = new Set<string>();
++				const ordered = raw
++					.filter(l => (seen.has(l) ? false : (seen.add(l), true)))
++					.sort((a, b) => (sitemap[a]?.title ?? a).localeCompare(sitemap[b]?.title ?? b));
++
++				container.innerHTML = '';
++				for (const link of ordered) {
++					const li = document.createElement('li');
++					li.style.setProperty('--depth', '0');
++
++					const a = document.createElement('a');
++					a.href = base_url + link;
++					a.style.setProperty('--depth', '0');
++					a.target = '_self';
++					a.className = 'slsg-backlink';
++
++					const span = document.createElement('span');
++					span.style.setProperty('--depth', '0');
++					span.textContent = sitemap[link]?.title ?? link;
++
++					a.appendChild(span);
++					li.appendChild(a);
++					container.appendChild(li);
++				}
++
++				panel.hidden = false;
+ 			});
+ 		}
+ 	});
 diff --git a/node_modules/starlight-site-graph/components/graph/preprocess-sitemap.ts b/node_modules/starlight-site-graph/components/graph/preprocess-sitemap.ts
 index 454814d..946f59d 100644
 --- a/node_modules/starlight-site-graph/components/graph/preprocess-sitemap.ts
