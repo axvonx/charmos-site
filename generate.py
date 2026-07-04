@@ -7,6 +7,7 @@ parallel, then compiles the JSON into MDX documentation.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -630,6 +631,137 @@ def assemble_site_content():
     end_step(t0)
 
 
+# Reverse link: each source page in the Woboq browser gets a "Go to docs" button
+# back to its reference page. Styled to match the landing page's primary action
+# card (light surface + evergreen pixel dissolve + accent border, docs sans font)
+# so it reads as a first-class docs control dropped into Woboq's chrome. The
+# button sits to the LEFT of Woboq's right-floated ~126px logo. The (large) pixel
+# dissolve lives in ONE stylesheet at /source/, linked by every page rather than
+# inlined 169× — see write_docs_backlink_css.
+GLOBAL_CSS = Path("./site/src/styles/global.css")
+DOCS_BACKLINK_CSS_NAME = "charm-docs-link.css"
+
+_DOCS_BACKLINK_CSS = """\
+/* Injected by generate.py (inject_docs_backlinks): a docs-styled "Go to docs"
+   button on each Woboq source page, matching the landing page primary action. */
+#header {{ position: relative; }}
+.charm-docs-link {{
+  position: absolute;
+  left: 50%; /* centered in the header, between search and the woboq logo */
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.6rem 1.2rem;
+  border: 1px solid #2f9355;
+  border-radius: 12px;
+  background-color: #f8f9fa;
+  background-image: {dissolve};
+  background-repeat: repeat-x;
+  background-size: 256px 120px;
+  background-position: top center;
+  image-rendering: pixelated;
+  color: #17181c !important;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}}
+.charm-docs-link:hover {{
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+  transform: translate(-50%, -50%) scale(1.02);
+}}
+.charm-docs-arrow {{ transition: transform 0.15s ease; }}
+.charm-docs-link:hover .charm-docs-arrow {{ transform: translateX(3px); }}
+@media (max-width: 800px) {{
+  .charm-docs-link {{ font-size: 0.9rem; padding: 0.45rem 0.9rem; }}
+}}
+"""
+
+
+def _pixel_dissolve_card_url() -> str:
+    """Pull the ``--pixel-dissolve-card`` ``url(...)`` value out of global.css so
+    the Woboq button reuses the exact same gradient as the landing card. Falls
+    back to a flat accent tint if the var can't be found."""
+    try:
+        css = GLOBAL_CSS.read_text(encoding="utf-8")
+    except OSError:
+        return "none"
+    m = re.search(r"--pixel-dissolve-card:\s*(url\(.*?\));", css, re.S)
+    return m.group(1) if m else "none"
+
+
+def write_docs_backlink_css() -> str:
+    """Write the single shared button stylesheet into the source browser and
+    return its root-relative href."""
+    css = _DOCS_BACKLINK_CSS.format(dissolve=_pixel_dissolve_card_url())
+    (SOURCE_BROWSER_OUT / DOCS_BACKLINK_CSS_NAME).write_text(css, encoding="utf-8")
+    return f"{SOURCE_BROWSER_URL}/{DOCS_BACKLINK_CSS_NAME}"
+
+
+def _build_source_to_doc_map() -> dict:
+    """Map ``<source rel path> → <doc page URL>`` for every generated reference
+    page, read from the assembled MDX. Each page carries its ``slug:`` (the URL)
+    and a ``page-source-path`` (the ``include/...`` file it documents); the file
+    matches the Woboq page's own path, so this is the authoritative join and it
+    only ever contains pages that actually survived generation."""
+    ref_root = SITE_DOCS / "reference"
+    if not ref_root.exists():
+        return {}
+    slug_re = re.compile(r"^slug:\s*(\S+)", re.MULTILINE)
+    src_re = re.compile(r'<code class="page-source-path">([^<]+)</code>')
+    mapping = {}
+    for mdx in ref_root.rglob("*.mdx"):
+        text = mdx.read_text(encoding="utf-8")
+        slug = slug_re.search(text)
+        src = src_re.search(text)
+        if slug and src:
+            mapping[src.group(1).strip()] = "/" + slug.group(1).strip("/") + "/"
+    return mapping
+
+
+def inject_docs_backlinks():
+    """Add a "Go to docs" button to each Woboq source page that has a doc page."""
+    t0 = begin_step("Inject docs backlinks", str(SOURCE_BROWSER_OUT))
+    project_root = SOURCE_BROWSER_OUT / SOURCE_BROWSER_PROJECT
+    if not project_root.exists():
+        end_step(t0, c("skipped — no source browser", GRAY))
+        return
+
+    mapping = _build_source_to_doc_map()
+    if not mapping:
+        end_step(t0, c("skipped — no doc pages", GRAY))
+        return
+
+    css_href = write_docs_backlink_css()
+    link_tag = f'<link rel="stylesheet" href="{css_href}"/>'
+
+    injected = 0
+    for src_rel, doc_url in mapping.items():
+        html_path = project_root / (src_rel + ".html")
+        if not html_path.exists():
+            continue
+        html = html_path.read_text(encoding="utf-8")
+        if "charm-docs-link" in html:  # idempotent
+            continue
+        button = (
+            f'<a class="charm-docs-link" href="{doc_url}">'
+            f'Go to docs <span class="charm-docs-arrow">→</span></a>'
+        )
+        # The header holds only the breadcrumb <h1>; close the button inside it.
+        new_html = html.replace("</h1></div>", "</h1>" + button + "</div>", 1)
+        new_html = new_html.replace("</head>", link_tag + "</head>", 1)
+        if new_html != html:
+            html_path.write_text(new_html, encoding="utf-8")
+            injected += 1
+
+    end_step(t0, f"{injected} page(s)")
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -667,6 +799,9 @@ def main():
     delete_empty_markdown()
     copy_directory_indexes()
     assemble_site_content()
+    # Reverse link (source → docs): needs both the browser and the assembled
+    # docs, so it runs last. Self-skips if either is absent.
+    inject_docs_backlinks()
 
     total_elapsed = time.monotonic() - t_total
     safe_print(

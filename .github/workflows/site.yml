@@ -39,7 +39,50 @@ jobs:
         with:
           python-version: '3.14'
 
+      # --- Clang toolchain for the Woboq /source/ browser + clang symbol index ---
+      # generate.py is best-effort: if any of this is missing it skips the source
+      # browser and falls back to GitHub blob links, so the site still deploys.
+      - name: Install clang toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build \
+            llvm-18-dev libclang-18-dev libclang-cpp18-dev \
+            libclang-common-18-dev clang-18
+
+      # Woboq's codebrowser has no release binaries, so we build it from a pinned
+      # commit against the LLVM 18 that ships on the runner. The built binaries +
+      # data assets are cached under .tools/woboq/, where generate.py auto-discovers
+      # them; bump WOBOQ_REV in the key to rebuild.
+      - name: Cache Woboq codebrowser
+        id: woboq-cache
+        uses: actions/cache@v4
+        with:
+          path: .tools/woboq
+          key: woboq-${{ runner.os }}-llvm18-ebe91a8
+
+      - name: Build Woboq codebrowser
+        if: steps.woboq-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          WOBOQ_REV=ebe91a86e4d06a23f5f7709d081f83e2cc14ef26
+          git clone https://github.com/KDAB/codebrowser.git /tmp/codebrowser
+          cd /tmp/codebrowser
+          git checkout "$WOBOQ_REV"
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
+            -DClang_DIR=/usr/lib/llvm-18/lib/cmake/clang
+          cmake --build build
+          mkdir -p "$GITHUB_WORKSPACE/.tools/woboq"
+          cp "$(find build -name codebrowser_generator -type f | head -1)" \
+             "$GITHUB_WORKSPACE/.tools/woboq/"
+          cp "$(find build -name codebrowser_indexgenerator -type f | head -1)" \
+             "$GITHUB_WORKSPACE/.tools/woboq/"
+          cp -r data "$GITHUB_WORKSPACE/.tools/woboq/data"
+
       - name: Generate
+        env:
+          CHARMOS_LIBCLANG: /usr/lib/llvm-18/lib/libclang.so.1
         run: |
           pip install -r requirements.txt --break-system-packages
           npm --prefix site i starlight-theme-obsidian

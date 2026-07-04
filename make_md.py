@@ -998,6 +998,10 @@ def generate_docs(json_dir: Path):
         only_one = len(file_ideas) == 1
         page_badge = None
 
+        # The file path + source/GitHub links come first, right under the page
+        # title, ahead of the ideas and the API reference sections.
+        combined_lines.append(page_source_header(data["file"]))
+
         for idea in file_ideas:
             md_text = idea["content_md"]
             mdx_title, md_body = extract_mdx_title(md_text)
@@ -1043,8 +1047,6 @@ def generate_docs(json_dir: Path):
 
         def collect_markdown_lines(module: Module):
             lines = []
-
-            lines.append(page_source_header(module.file))
 
             # Constructs are grouped under a visible "## {Category}" section.
             # Each construct gets an *item* heading "### {kind} {name}" that the
