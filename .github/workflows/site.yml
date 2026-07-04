@@ -46,7 +46,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build \
+            cmake ninja-build nasm \
             llvm-18-dev libclang-18-dev libclang-cpp18-dev \
             libclang-common-18-dev clang-18
 
