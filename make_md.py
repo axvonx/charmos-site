@@ -273,6 +273,21 @@ def dir_slug_path(rel_dir: Path, label_map: dict) -> str:
     return "/".join(_dir_name_to_slug(s) for s in _resolve_dir_segments(rel_dir, label_map))
 
 
+def doc_page_url(source_file: str, label_map: dict) -> str | None:
+    """Root-relative doc-page URL for a documented source file (no anchor), or
+    None if the file lives outside the reference tree. This is the single place
+    that maps ``charmos/include/<dir>/<stem>.h`` → ``/reference/<slug>/<stem>/``,
+    so prose/footnote *references* to a documented file link to its doc page
+    (policy: references → docs) instead of GitHub source."""
+    try:
+        rel = Path(source_file).relative_to("charmos/include")
+    except ValueError:
+        return None
+    slug_dir = dir_slug_path(rel.parent, label_map)
+    stem = rel.stem
+    return f"{REFERENCE_PREFIX}/{slug_dir}/{stem}/" if slug_dir else f"{REFERENCE_PREFIX}/{stem}/"
+
+
 def type_anchor(kind: str, name: str) -> str:
     """Anchor id for a documented construct.
 
@@ -510,7 +525,7 @@ def build_json_title_index(json_dir: Path):
     return index
 
 
-def embed_idea_refs_in_md(md_text: str, idea, json_title_index=None):
+def embed_idea_refs_in_md(md_text: str, idea, json_title_index=None, label_map=None):
     refs = idea.get("references", {}).get("idea_refs", [])
     if not refs or not json_title_index:
         return md_text
@@ -521,23 +536,35 @@ def embed_idea_refs_in_md(md_text: str, idea, json_title_index=None):
 
         if ref_lower in json_title_index:
             json_src = json_title_index[ref_lower]
-            link_url = generate_github_link_safe(json_src)
+            # A footnote cross-link ("APCs", "DPCs", …) is a reference → link to
+            # the target's doc page, not its GitHub source. This also makes the
+            # idea page an internal link source, feeding the site graph.
+            link_url = (doc_page_url(json_src, label_map) if label_map else None) or (
+                generate_github_link_safe(json_src)
+            )
             link_md = f"[{ref_string}]({link_url})"
             md_text = re.sub(re.escape(ref_string), link_md, md_text)
 
     return md_text
 
 
-def build_global_function_table(c_parse_map: dict):
+def build_global_function_table(c_parse_map: dict, doc_table: dict | None = None):
+    """Map function name → URL used when the name is mentioned in idea prose.
+
+    A prose mention is a *reference*, so it links to the function's doc page
+    (policy: references → docs) when documented — which also makes the idea page
+    an internal link source, so the theme's backlinks panel/site graph surface
+    "which ideas reference this API". Falls back to the GitHub source link when
+    the function has no doc anchor.
+    """
     func_table = {}
     for file_path, c_parse in c_parse_map.items():
         for f in c_parse.get("functions", []):
             name = f.get("name")
-            if not name:
+            if not name or name in func_table:
                 continue
-            if name not in func_table:
-                url = generate_github_link_safe(file_path, f.get("line"))
-                func_table[name] = url
+            doc_url = doc_table.get(name.lower()) if doc_table else None
+            func_table[name] = doc_url or generate_github_link_safe(file_path, f.get("line"))
     return func_table
 
 
@@ -891,12 +918,23 @@ def generate_docs(json_dir: Path):
         src_file = idea["path"]
         ideas_by_file[src_file].append(idea)
 
-    functions_map = build_global_function_table(c_parse_map)
+    functions_map = build_global_function_table(c_parse_map, doc_table)
+
+    # Map a referenced file's basename → its documented source path, so a file
+    # mention in prose links to that file's doc page (references → docs) rather
+    # than GitHub. Falls back to a GitHub link for undocumented files.
+    source_by_name = {}
+    for src in c_parse_map:
+        source_by_name.setdefault(Path(src).name, src)
 
     # Second pass: build function/file links
     for idea in ideas:
         for f in idea.get("references", {}).get("files", []):
-            files_map[f["name"]] = generate_github_link_safe(f["name"])
+            fname = f["name"]
+            src = source_by_name.get(fname) or source_by_name.get(Path(fname).name)
+            files_map[fname] = (doc_page_url(src, label_map) if src else None) or (
+                generate_github_link_safe(fname)
+            )
 
     # Step 2: For each JSON file, write the Markdown with ideas on top
     for i, json_file in enumerate(json_dir.glob("*.json"), start=1):
@@ -971,7 +1009,7 @@ def generate_docs(json_dir: Path):
             md_body = link_bugs_in_md(md_body)
             md_body = link_commits_in_md(md_body)
             md_body = merge_changelog_and_notes(md_body)
-            md_body = embed_idea_refs_in_md(md_body, idea, json_title_index)
+            md_body = embed_idea_refs_in_md(md_body, idea, json_title_index, label_map)
             md_body = convert_blockquotes_to_asides(md_body)
             md_body = convert_h2_to_header_with_icon(md_body)
 

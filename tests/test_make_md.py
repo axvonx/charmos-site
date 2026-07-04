@@ -11,10 +11,12 @@ from docmodel import Composite, Enum, Function
 from make_md import (
     _dir_name_to_slug,
     assemble_page_text,
+    build_global_function_table,
     convert_blockquotes_to_asides,
     convert_h2_to_header_with_icon,
     dir_label_path,
     dir_slug_path,
+    doc_page_url,
     extract_mdx_title,
     format_enum_as_c_code,
     format_function_signature,
@@ -29,6 +31,29 @@ from make_md import (
     normalize_type_name,
     status_to_badge,
 )
+
+# ── build_global_function_table ──────────────────────────────────────────────
+
+
+class TestBuildGlobalFunctionTable:
+    def test_prefers_doc_url_when_documented(self):
+        # A prose function mention is a reference → link to its doc page (so it
+        # also feeds the site-graph as an internal edge), not GitHub source.
+        c_parse_map = {"charmos/include/x.h": {"functions": [{"name": "foo", "line": 10}]}}
+        doc_table = {"foo": "/reference/x/#function-foo"}
+        table = build_global_function_table(c_parse_map, doc_table)
+        assert table["foo"] == "/reference/x/#function-foo"
+
+    def test_falls_back_to_github_when_undocumented(self):
+        c_parse_map = {"charmos/include/x.h": {"functions": [{"name": "bar", "line": 5}]}}
+        table = build_global_function_table(c_parse_map, {})
+        assert "github.com" in table["bar"]
+
+    def test_no_doc_table_uses_github(self):
+        c_parse_map = {"charmos/include/x.h": {"functions": [{"name": "baz"}]}}
+        table = build_global_function_table(c_parse_map)
+        assert "github.com" in table["baz"]
+
 
 # ── linkify_code_fences ──────────────────────────────────────────────────────
 
@@ -367,6 +392,25 @@ class TestDirLabelAndSlug:
             label = dir_label_path(rel, self.LABEL_MAP)
             expected_slug = "/".join(_dir_name_to_slug(seg) for seg in label.split("/"))
             assert dir_slug_path(rel, self.LABEL_MAP) == expected_slug
+
+
+class TestDocPageUrl:
+    LABEL_MAP = {("thread",): "Threads and Work", ("sch",): "Scheduling and Multitasking"}
+
+    def test_maps_source_file_to_doc_page(self):
+        # A footnote/prose reference to a documented file → its doc page URL.
+        assert (
+            doc_page_url("charmos/include/thread/apc.h", self.LABEL_MAP)
+            == "/reference/threads-and-work/apc/"
+        )
+
+    def test_top_level_file_has_no_middle_segment(self):
+        assert (
+            doc_page_url("charmos/include/bootstage.h", self.LABEL_MAP) == "/reference/bootstage/"
+        )
+
+    def test_outside_reference_tree_returns_none(self):
+        assert doc_page_url("charmos/kernel/foo.c", self.LABEL_MAP) is None
 
 
 # ── generate_github_link_safe ────────────────────────────────────────────────

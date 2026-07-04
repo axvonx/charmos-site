@@ -8,6 +8,19 @@
   --sl-color-accent: hsl(142, 55%, 48%);
   --sl-color-accent-low: hsl(145, 50%, 34%);
   --sl-hero-color: hsla(140, 55%, 45%, 30%);
+
+  /* A 2×2 tile with one 1px evergreen pixel (a 25%-coverage ordered dither).
+     Tiled + pixelated over the ambient wash to give its fade a chunky,
+     dithered edge instead of a smooth ramp. */
+  --pixel-dither: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='3' height='3'%3E%3Crect width='1' height='1' fill='%232e9e57' fill-opacity='0.5'/%3E%3Crect x='1' y='1' width='1' height='1' fill='%232e9e57' fill-opacity='0.28'/%3E%3C/svg%3E");
+
+  /* The ambient wash itself: an ANGLED evergreen gradient clipped to a WAVY
+     lower edge (a double cubic-bezier crest/trough), so the green reads as a
+     deliberate organic band rather than a flat perfect fade. Stretched
+     (preserveAspectRatio=none) to whatever it backs; the dither above adds the
+     pixelated texture. Reused verbatim by the page, the hero, and the primary
+     home card so the treatment is identical everywhere. */
+  --wave-wash: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='w' x1='0' y1='0' x2='0.55' y2='1'%3E%3Cstop offset='0' stop-color='%232e9e57' stop-opacity='0.34'/%3E%3Cstop offset='0.55' stop-color='%232e9e57' stop-opacity='0.1'/%3E%3Cstop offset='1' stop-color='%232e9e57' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath fill='url(%23w)' d='M0 0 H120 V40 C 98 64 86 38 62 52 C 42 63 20 42 0 58 Z'/%3E%3C/svg%3E");
 }
 
 :root[data-theme="light"] {
@@ -21,14 +34,10 @@
   padding: 0;
 }
 
-/* Hero style */
+/* Hero pages reuse the shared wavy wash from the `body, .page` rule — no
+   bespoke hero gradient, so the treatment is identical everywhere. */
 [data-has-hero] .page {
   height: 100%;
-  background: linear-gradient(215deg, var(--sl-hero-color), transparent 40%),
-    radial-gradient(var(--sl-hero-color), transparent 40%) no-repeat -60vw -40vh /
-      150vw 200vh,
-    radial-gradient(var(--sl-hero-color), transparent 65%) no-repeat 50%
-      calc(100% + 20rem) / 150rem 30rem;
 }
 
 [data-has-hero] header {
@@ -120,38 +129,28 @@
     position: relative;
     background-color: var(--sl-color-bg);
 
-    /* single soft circular glow */
-    background-image: radial-gradient(
-      circle at center,
-      var(--glow-accent-strong),
-      transparent 100%
-    );
-    background-repeat: no-repeat;
-    background-size: 800vmax 800vmax; /* bigger, perfectly circular */
-    background-position: 30% 25%; /* starting position */
-    background-attachment: fixed;
+    /* Angled, wavy evergreen wash (see --wave-wash) with the pixel dither on
+       top — a deliberate organic band, not a flat perfect fade. Fixed to the
+       viewport; the same treatment is reused on the hero and the primary home
+       card for consistency. */
+    background-image: var(--pixel-dither), var(--wave-wash);
+    background-repeat: repeat, no-repeat;
+    background-size: 3px 3px, 100% 100%;
+    background-position: top left, top center;
+    background-attachment: fixed, fixed;
+    image-rendering: pixelated;
 
     transition: background-color 0.3s ease, background-image 0.3s ease;
-    overflow-x: hidden;
+    /* `clip` — NOT `hidden`. `overflow: hidden` turns `.page` into a
+       programmatically-scrollable container (scrollIntoView can scroll it), so
+       jumping to an anchor near the page bottom (e.g. a footnote) scrolled
+       `.page` on top of the app-shell's real scroller (`.main-frame`),
+       displacing the whole layout and leaving an empty void. `clip` clips
+       horizontal overflow WITHOUT creating a scroll container, keeping
+       `.main-frame` the sole scroller. */
+    overflow-x: clip;
   }
 
-  @keyframes singleGlowDrift {
-    0% {
-      background-position: 30% 25%;
-    }
-    25% {
-      background-position: 60% 40%;
-    }
-    50% {
-      background-position: 70% 65%;
-    }
-    75% {
-      background-position: 35% 70%;
-    }
-    100% {
-      background-position: 30% 25%;
-    }
-  }
   /* Buttery smooth fade-in for text */
   @keyframes butteryFade {
     0% {
@@ -318,8 +317,7 @@ starlight-toc a[href^="#variable-"] {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  padding: 1.25rem 1.5rem;
+  padding: 1.1rem 1.5rem;
   border: 1px solid var(--sl-color-gray-5);
   border-radius: var(--sl-border-radius-lg, 12px);
   background: var(--sl-color-bg-nav, var(--sl-color-bg));
@@ -332,13 +330,34 @@ starlight-toc a[href^="#variable-"] {
   background: var(--sl-color-accent-low);
   transform: translateY(-2px);
 }
+/* Icon + label (+ arrow) share one row. */
+.home-action__head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.home-action__icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--sl-color-accent-high);
+}
+.home-action__icon svg {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+.home-action--primary .home-action__icon svg {
+  width: 1.9rem;
+  height: 1.9rem;
+}
 .home-action--primary {
-  padding: 1.75rem 2rem;
-  background: linear-gradient(
-    135deg,
-    var(--sl-color-accent-low),
-    var(--sl-color-bg-nav, var(--sl-color-bg))
-  );
+  padding: 1.5rem 2rem;
+  /* Same wavy dithered wash as the page/hero, over the card's nav background. */
+  background-color: var(--sl-color-bg-nav, var(--sl-color-bg));
+  background-image: var(--pixel-dither), var(--wave-wash);
+  background-repeat: repeat, no-repeat;
+  background-size: 3px 3px, 100% 100%;
+  background-position: top left, top center;
+  image-rendering: pixelated;
   border-color: var(--sl-color-accent);
 }
 .home-action__label {
@@ -348,15 +367,25 @@ starlight-toc a[href^="#variable-"] {
 .home-action--primary .home-action__label {
   font-size: var(--sl-text-h2);
 }
+/* Description is hidden by default and revealed on hover/focus (like the
+   header's Blog/Code tooltips) — it slides open beneath the label. */
 .home-action__desc {
   font-size: var(--sl-text-sm);
   color: var(--sl-color-gray-2);
   max-width: 42rem;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease, margin-top 0.25s ease;
+}
+.home-action:hover .home-action__desc,
+.home-action:focus-visible .home-action__desc {
+  max-height: 6rem;
+  opacity: 1;
+  margin-top: 0.5rem;
 }
 .home-action__arrow {
-  position: absolute;
-  top: 1.25rem;
-  inset-inline-end: 1.5rem;
+  margin-inline-start: auto;
   font-size: 1.25rem;
   color: var(--sl-color-accent-high);
   transition: transform 0.15s;
@@ -397,4 +426,23 @@ starlight-toc a[href^="#variable-"] {
    ("Auto") sits flush against it. Add a little inline padding so it breathes. */
 .mobile-preferences starlight-theme-select {
   padding-inline-start: 0.6rem;
+}
+
+/* Starlight's theme select (Auto/Light/Dark — the laptop/sun/moon icon, the
+   label text, and the caret) defaults to a plain gray that ignores the theme.
+   Tint it with the evergreen accent so it matches the GitHub/RSS/Blog/Code
+   icons beside it. Unlayered, so it wins over Starlight's layered gray. */
+starlight-theme-select label,
+starlight-theme-select select,
+starlight-theme-select .icon {
+  color: var(--sl-color-text-accent);
+}
+starlight-theme-select label:hover {
+  opacity: 0.66;
+  color: var(--sl-color-text-accent);
+}
+/* The dropdown options render on the OS surface; keep them legible on the
+   nav background with the accent as their selection/text hint. */
+starlight-theme-select option {
+  color: var(--sl-color-white);
 }
