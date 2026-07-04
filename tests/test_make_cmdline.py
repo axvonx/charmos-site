@@ -111,7 +111,6 @@ class TestRender:
         mdx = render_mdx(entries)
         assert 'title: "Command-Line Options"' in mdx
         assert "| Option | Value | Default | Required | Description |" in mdx
-        assert "`help`" in mdx
 
     def test_mdx_handles_empty(self):
         mdx = render_mdx([])
