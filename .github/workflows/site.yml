@@ -54,18 +54,23 @@ jobs:
       # commit against the LLVM 18 that ships on the runner. The built binaries +
       # data assets are cached under .tools/woboq/, where generate.py auto-discovers
       # them; bump WOBOQ_REV in the key to rebuild.
+      #
+      # WOBOQ_REV is pinned to the last commit that builds on LLVM 18: codebrowser
+      # master ("Support Clang 22") uses LLVM 22-only APIs (getTagType/StringSwitch)
+      # that don't exist in 18. 02e30f8 ("Fix build for Clang 21") is the parent —
+      # its only newer-Clang code is CLANG_VERSION_MAJOR>=21 guarded, so 18 builds.
       - name: Cache Woboq codebrowser
         id: woboq-cache
         uses: actions/cache@v4
         with:
           path: .tools/woboq
-          key: woboq-${{ runner.os }}-llvm18-ebe91a8
+          key: woboq-${{ runner.os }}-llvm18-02e30f8
 
       - name: Build Woboq codebrowser
         if: steps.woboq-cache.outputs.cache-hit != 'true'
         run: |
           set -eux
-          WOBOQ_REV=ebe91a86e4d06a23f5f7709d081f83e2cc14ef26
+          WOBOQ_REV=02e30f8f05c347b5d3831d45da7efbc3059f3c74
           git clone https://github.com/KDAB/codebrowser.git /tmp/codebrowser
           cd /tmp/codebrowser
           git checkout "$WOBOQ_REV"
