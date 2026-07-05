@@ -739,6 +739,33 @@ def fence_or_sourceblock(c_code, def_name=None, def_href=None):
 # handed to the linkifier verbatim.
 _C_FENCE_RE = re.compile(r"(?ms)^```c[ \t]*\n(.*?)\n```[ \t]*$")
 
+# A single-line self-closing <SourceBlock ... /> (json.dumps emits no newlines,
+# and C tokens never produce a literal "/>", so a non-greedy match is safe).
+_SOURCEBLOCK_TAG_RE = re.compile(r"<SourceBlock\b.*?/>")
+_SB_PLACEHOLDER = "\x00SB{}\x00"
+_SB_PLACEHOLDER_RE = re.compile(r"\x00SB(\d+)\x00")
+
+
+def _stash_sourceblocks(md: str):
+    """Replace emitted <SourceBlock/> components with opaque placeholders.
+
+    Their ``segments={...}`` JSON carries ``#line`` hrefs and symbol names that
+    the inline-link/text passes would otherwise mangle (e.g. link_bugs' ``#\\d+``
+    rewriting a ``#141`` line anchor into a GitHub issue link). Returns the
+    placeholdered text plus the list of originals for :func:`_restore_sourceblocks`.
+    """
+    blocks: list[str] = []
+
+    def stash(m):
+        blocks.append(m.group(0))
+        return _SB_PLACEHOLDER.format(len(blocks) - 1)
+
+    return _SOURCEBLOCK_TAG_RE.sub(stash, md), blocks
+
+
+def _restore_sourceblocks(md: str, blocks: list[str]) -> str:
+    return _SB_PLACEHOLDER_RE.sub(lambda m: blocks[int(m.group(1))], md)
+
 
 def linkify_code_fences(md: str) -> str:
     """Turn authored ```c fenced blocks into linkified <SourceBlock>s, so example
@@ -1005,9 +1032,12 @@ def generate_docs(json_dir: Path):
         for idea in file_ideas:
             md_text = idea["content_md"]
             mdx_title, md_body = extract_mdx_title(md_text)
-            # Convert authored ```c blocks to linkified SourceBlocks first, so the
-            # later inline-link transforms see an opaque component, not raw code.
+            # Convert authored ```c blocks to linkified SourceBlocks first, then
+            # stash those components so the inline-link/text passes treat them as
+            # truly opaque — their segments JSON (#line hrefs, symbol names) must
+            # survive link_bugs/link_functions/etc. untouched.
             md_body = linkify_code_fences(md_body)
+            md_body, _sourceblocks = _stash_sourceblocks(md_body)
             md_body = link_functions_in_md(md_body, functions_map)
             md_body = link_files_in_md(md_body, files_map)
             md_body = link_bugs_in_md(md_body)
@@ -1016,6 +1046,7 @@ def generate_docs(json_dir: Path):
             md_body = embed_idea_refs_in_md(md_body, idea, json_title_index, label_map)
             md_body = convert_blockquotes_to_asides(md_body)
             md_body = convert_h2_to_header_with_icon(md_body)
+            md_body = _restore_sourceblocks(md_body, _sourceblocks)
 
             idea_name = idea["name"]
             combined_lines.append(f"# {idea['size'].capitalize()} Idea: {idea_name}\n")

@@ -73,7 +73,25 @@ export default defineConfig({
           postCount: 10,
         }),
         starlightThemeObsidian({
-          sitemapConfig: {},
+          sitemapConfig: {
+            // The graph should map the DOCUMENTATION site only. Without this,
+            // the `astro:build:done` HTML crawl walked dist/source/** (the Woboq
+            // code browser) too, flooding the graph with ~1300 source-file nodes
+            // plus garbage: `*chtml`/`*hhtml` slugs (alloc.c.html → allocchtml)
+            // and `[+]`-titled nodes from Woboq's folder-expander links.
+            // - pageInclusionRules matches the absolute built-file PATH, so the
+            //   glob must catch a `source` segment anywhere (`**/source/**`) —
+            //   an anchored `source/**` never matches `/…/dist/source/…`. This
+            //   stops crawling the source browser, which also kills the garbage
+            //   nodes its directory-index pages spawn (their relative
+            //   `alloc.c.html` links slugify to bare `allocchtml`, and its `[+]`
+            //   folder-expander links become `[+]`-titled nodes).
+            // - linkInclusionRules matches the resolved SLUG, so `!source/**`
+            //   drops doc→/source/ links (SourceBlock symbol links) too.
+            // Reference/blog/guides/design and their interlinks are unaffected.
+            pageInclusionRules: ["!**/source/**", "**/*"],
+            linkInclusionRules: ["!source/**", "**/*"],
+          },
           graphConfig: {
             // Directed edges: an arrow points from the page that references to
             // the page it references. So from the current node, an outgoing

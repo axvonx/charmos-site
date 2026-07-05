@@ -78,3 +78,35 @@ class TestCodeRendererPolicy:
             {"name": "irql_raise", "file": "kernel/sch/irql.c", "line": 38}, {}
         )
         assert url == "/source/charmos/kernel/sch/irql.c.html#38"
+
+
+class TestStashSourceBlocks:
+    """Emitted <SourceBlock/> components must be shielded from the inline-link
+    text passes: their segments JSON carries #line hrefs and symbol names that
+    e.g. link_bugs' `#\\d+` autolinker would otherwise corrupt (a #141 source
+    line anchor became `[#141](.../issues/141)`, spawning a garbage graph node)."""
+
+    SB = (
+        '<SourceBlock segments={[{"text": "X", "cls": "ident", '
+        '"href": "/source/charmos/include/sch/irql.h.html#141"}]} />'
+    )
+
+    def test_link_bugs_does_not_touch_stashed_sourceblock(self):
+        stashed, blocks = make_md._stash_sourceblocks(self.SB)
+        assert "SourceBlock" not in stashed  # fully replaced by a placeholder
+        stashed = make_md.link_bugs_in_md(stashed)
+        assert make_md._restore_sourceblocks(stashed, blocks) == self.SB
+
+    def test_prose_bug_refs_still_autolink_around_a_sourceblock(self):
+        text = f"see #141\n\n{self.SB}\n\nand #7 too"
+        stashed, blocks = make_md._stash_sourceblocks(text)
+        out = make_md._restore_sourceblocks(make_md.link_bugs_in_md(stashed), blocks)
+        assert "[#141](https://github.com/axvonx/charmos/issues/141)" in out
+        assert "[#7](https://github.com/axvonx/charmos/issues/7)" in out
+        assert self.SB in out  # the block's own #141 stayed an anchor
+
+    def test_multiple_sourceblocks_roundtrip(self):
+        a = self.SB
+        b = self.SB.replace("#141", "#99")
+        stashed, blocks = make_md._stash_sourceblocks(f"{a} middle {b}")
+        assert make_md._restore_sourceblocks(stashed, blocks) == f"{a} middle {b}"

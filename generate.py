@@ -339,6 +339,31 @@ def _resolve_tool(name):
     return shutil.which(name) or (name if Path(name).exists() else None)
 
 
+# Woboq bakes external hotlinks to its own logo into every page: the header
+# logo (woboq-48.png, still served) and a footer attribution logo
+# (woboq-16.png, which now 404s on their server → a broken image on every page).
+# We already ship woboq-48.png under data/, so point both at the local copy —
+# no broken image, no external image dependency, attribution text preserved.
+_WOBOQ_LOGO_HOTLINKS = (
+    "https://code.woboq.org/woboq-16.png",
+    "https://code.woboq.org/data/woboq-48.png",
+)
+
+
+def _localize_woboq_logos():
+    """Rewrite Woboq's external logo hotlinks to the local data/woboq-48.png."""
+    local = f"{SOURCE_BROWSER_URL}/data/woboq-48.png"
+    if not (SOURCE_BROWSER_OUT / "data" / "woboq-48.png").exists():
+        return
+    for html_path in SOURCE_BROWSER_OUT.rglob("*.html"):
+        text = html_path.read_text(encoding="utf-8")
+        new = text
+        for hotlink in _WOBOQ_LOGO_HOTLINKS:
+            new = new.replace(hotlink, local)
+        if new != text:
+            html_path.write_text(new, encoding="utf-8")
+
+
 def build_source_browser():
     """Generate a Woboq clang cross-referenced source browser into site/public/source.
 
@@ -386,11 +411,26 @@ def build_source_browser():
 
     idx = _resolve_tool(WOBOQ_IDX)
     if idx is not None:
-        subprocess.run([idx, str(SOURCE_BROWSER_OUT.resolve())], capture_output=True, text=True)
+        # The index generator needs the SAME -d data URL as the file generator;
+        # without it, the directory-index pages reference /data/... at the site
+        # root (404) instead of /source/data/..., so they render unstyled and
+        # their [+] folder expanders (jquery) are dead.
+        subprocess.run(
+            [
+                idx,
+                str(SOURCE_BROWSER_OUT.resolve()),
+                "-d",
+                f"{SOURCE_BROWSER_URL}/data",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
     # Copy Woboq's static assets (js/css) to /source/data.
     if WOBOQ_DATA and Path(WOBOQ_DATA).exists():
         shutil.copytree(WOBOQ_DATA, SOURCE_BROWSER_OUT / "data", dirs_exist_ok=True)
+
+    _localize_woboq_logos()
 
     end_step(t0, f"{html_count} files")
     return True
@@ -677,8 +717,24 @@ _DOCS_BACKLINK_CSS = """\
 }}
 .charm-docs-arrow {{ transition: transform 0.15s ease; }}
 .charm-docs-link:hover .charm-docs-arrow {{ transform: translateX(3px); }}
+/* Woboq's header is only ~5.2em tall and, at phone widths, already packed with
+   the search box (top-left), breadcrumb (row 2) and logo (top-right). A centred
+   button lands on top of the breadcrumb, so on small screens tuck it into the
+   one free corner — bottom-right, just under the logo — and drop the centring
+   transform (base + hover) that positioned it. */
 @media (max-width: 800px) {{
-  .charm-docs-link {{ font-size: 0.9rem; padding: 0.45rem 0.9rem; }}
+  .charm-docs-link {{
+    left: auto;
+    right: 0.4rem;
+    top: auto;
+    bottom: 0.35rem;
+    transform: none;
+    font-size: 0.8rem;
+    padding: 0.28rem 0.6rem;
+  }}
+  .charm-docs-link:hover {{
+    transform: none;
+  }}
 }}
 """
 

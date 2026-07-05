@@ -408,6 +408,24 @@ starlight-toc a[href^="#variable-"] {
   display: none;
 }
 
+/* Splash/hero pages use `template: splash` → no sidebar, so Starlight never
+   renders the mobile copy of the header controls inside a hamburger menu. The
+   only copy is the header's `.right-group`, which Starlight hides below the md
+   (50rem) breakpoint — leaving the mobile splash page with NO way to reach
+   GitHub / RSS / Blog / Browse code / the theme picker. Force that group
+   visible on hero pages at every width. Doc/blog pages are unaffected: they
+   have no `[data-has-hero]`, keep their sidebar copy, and never match here. */
+@media (max-width: 50rem) {
+  [data-has-hero] header .right-group {
+    display: flex;
+  }
+  /* The blog nav (Blog + Browse-codebase links) carries its own separate
+     below-md hide rule, so un-hiding the group alone still drops those two. */
+  [data-has-hero] header .right-group .starlight-blog-nav {
+    display: inline-flex;
+  }
+}
+
 /* The header social icons (GitHub/RSS) carry an extra 16px inline padding that
    pushes them right of the sidebar's text edge (title, search, nav all start at
    the same x). Drop it so the first icon lines up with everything else. */
