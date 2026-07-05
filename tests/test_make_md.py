@@ -447,6 +447,23 @@ class TestFormatEnum:
         assert "enum color" in result
         assert "RED = 0" in result
 
+    def test_enum_with_underlying_type_rendered(self):
+        e = Enum.from_dict(
+            {
+                "name": "flags",
+                "underlying_type": "uint8_t",
+                "members": [{"name": "A", "value": "1"}],
+            }
+        )
+        result = format_enum_as_c_code(e, "test.h")
+        assert "enum flags : uint8_t {" in result
+
+    def test_enum_without_underlying_type_has_no_colon(self):
+        e = Enum.from_dict({"name": "color", "members": [{"name": "RED", "value": "0"}]})
+        result = format_enum_as_c_code(e, "test.h")
+        assert "enum color {" in result
+        assert ":" not in result.split("{")[0]
+
 
 # ── format_struct_as_c_code ──────────────────────────────────────────────────
 
@@ -469,6 +486,24 @@ class TestFormatStruct:
         assert "```c" in result
         assert "struct point" in result
         assert "int" in result
+
+    def test_struct_bitfield_member_rendered(self):
+        s = Composite.from_dict(
+            {
+                "name": "flags",
+                "kind": "struct",
+                "members": [
+                    {"name": "a", "type": "unsigned int", "bitfield": "3"},
+                    {"name": "b", "type": "unsigned int", "bitfield": "5"},
+                    {"name": "c", "type": "unsigned int", "bitfield": None},
+                ],
+            }
+        )
+        result = format_struct_as_c_code(s, "test.h")
+        assert "a : 3;" in result
+        assert "b : 5;" in result
+        # A non-bitfield member gets no ``: width``.
+        assert "c;" in result
 
 
 # ── format_function_signature ────────────────────────────────────────────────

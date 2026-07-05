@@ -634,7 +634,8 @@ def _render_struct_body(members: list[Field], indent: int, col_width: int) -> li
             lines.append(f"{pad}}}{closing_name};{offset_comment}")
         else:
             type_padding = " " * max(col_width - len(m_type), 1)
-            lines.append(f"{pad}{m_type}{type_padding}{m_name};{offset_comment}")
+            bitfield = f" : {m.bitfield}" if m.bitfield else ""
+            lines.append(f"{pad}{m_type}{type_padding}{m_name}{bitfield};{offset_comment}")
 
     return lines
 
@@ -672,8 +673,9 @@ def format_struct_as_c_code(s: Composite, file: str | None) -> str:
 def format_enum_as_c_code(e: Enum, file: str | None) -> str:
     """Render an enum as a clickable <SourceBlock>; its name links to source."""
     name = e.name or "?"
+    underlying = f" : {e.underlying}" if e.underlying else ""
 
-    code_lines = [f"enum {name} {{"]
+    code_lines = [f"enum {name}{underlying} {{"]
     for m in e.members:
         m_name = (m.name or "").strip()
         value_str = f" = {m.value}" if m.value is not None else ""

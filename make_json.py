@@ -90,27 +90,33 @@ def should_ignore_file(path: Path):
     return False
 
 
-def get_full_return_type(type_node, declarator_node, code_bytes):
+def get_full_return_type(container_node, type_node, declarator_node, code_bytes):
+    # Prefer the qualifier-aware walk over the whole declaration; fall back to
+    # the bare ``type`` field if the container yields nothing (e.g. odd parses).
+    type_str = _leading_type_text(container_node, code_bytes) if container_node else ""
+    if not type_str:
+        type_str = (
+            code_bytes[type_node.start_byte : type_node.end_byte].decode("utf-8").strip()
+            if type_node
+            else ""
+        )
+
+    return _append_pointer_stars(type_str, declarator_node)
+
+
+def get_typedef_type(container_node, type_node, declarator_node, code_bytes):
+    # ``typedef const int foo`` keeps the ``const`` here — the bare ``type`` node
+    # would only be ``int``. Stop at the typedef name (a ``type_identifier``)
+    # so it isn't swept into the type text.
     type_str = (
-        code_bytes[type_node.start_byte : type_node.end_byte].decode("utf-8").strip()
-        if type_node
-        else ""
+        _leading_type_text(container_node, code_bytes, declarator_node) if container_node else ""
     )
-
-    ptr_node = declarator_node
-    while ptr_node and ptr_node.type == "pointer_declarator":
-        type_str += " *"
-        ptr_node = ptr_node.child_by_field_name("declarator")
-
-    return type_str
-
-
-def get_typedef_type(type_node, declarator_node, code_bytes):
-    type_str = (
-        code_bytes[type_node.start_byte : type_node.end_byte].decode("utf-8").strip()
-        if type_node
-        else ""
-    )
+    if not type_str:
+        type_str = (
+            code_bytes[type_node.start_byte : type_node.end_byte].decode("utf-8").strip()
+            if type_node
+            else ""
+        )
 
     node = declarator_node
     while node:
@@ -125,7 +131,7 @@ def get_typedef_type(type_node, declarator_node, code_bytes):
                     if p.type == "parameter_declaration":
                         p_type_node = p.child_by_field_name("type")
                         p_decl_node = p.child_by_field_name("declarator")
-                        p_type = (
+                        p_type = _leading_type_text(p, code_bytes) or (
                             code_bytes[p_type_node.start_byte : p_type_node.end_byte]
                             .decode("utf-8")
                             .strip()
@@ -287,7 +293,8 @@ def extract_function_name_and_params(declarator_node, code_bytes):
             if p.type == "parameter_declaration":
                 p_type_node = p.child_by_field_name("type")
                 p_decl_node = p.child_by_field_name("declarator")
-                p_type = (
+                # Qualifier-aware type; fall back to the bare ``type`` field.
+                p_type = _leading_type_text(p, code_bytes) or (
                     code_bytes[p_type_node.start_byte : p_type_node.end_byte]
                     .decode("utf-8")
                     .strip()
@@ -329,8 +336,11 @@ def node_text(node, code):
     text = code[node.start_byte : node.end_byte].decode("utf-8").strip()
     # Collapse newline + any following whitespace into a single space so that
     # multi-line declarators (e.g. function-pointer members split across lines)
-    # don't carry raw indentation into the JSON.
+    # don't carry raw indentation into the JSON. Runs of spaces are likewise
+    # collapsed so that blanked-out regions (e.g. a neutralized enum
+    # underlying-type clause) don't leave visible gaps in a type string.
     text = re.sub(r"\n\s*", " ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return text
 
 
@@ -339,6 +349,110 @@ def node_raw_text(node, code):
     if not node:
         return None
     return code[node.start_byte : node.end_byte].decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Full type-text extraction (qualifier-aware)
+# ---------------------------------------------------------------------------
+#
+# tree-sitter exposes only a single ``type`` field on a declaration/field/param
+# node — the *base* type (``int``, ``char``, ``struct foo`` …). Leading
+# qualifiers and extra specifiers (``const``, ``volatile``, ``_Atomic``,
+# ``restrict``, ``unsigned`` when split out, …) sit as *sibling* nodes, so
+# grabbing just the ``type`` field silently drops them. These helpers rebuild
+# the full leading type text by walking every specifier/qualifier child up to
+# the declarator, so ``const volatile int`` no longer collapses to ``int``.
+
+# Node types that mark the start of the declarator (the name side of a
+# declaration) — the type text is everything *before* the first of these.
+_DECLARATOR_START = {
+    "pointer_declarator",
+    "array_declarator",
+    "function_declarator",
+    "init_declarator",
+    "identifier",
+    "field_identifier",
+    "bitfield_clause",
+    "=",
+    ";",
+    ",",
+}
+
+# Leading children that are not part of the *type* proper. ``typedef`` is a bare
+# keyword token (not a storage_class_specifier) so it is listed explicitly.
+_LEADING_TYPE_SKIP = {"storage_class_specifier", "comment", "typedef"}
+
+
+def _leading_type_text(container, code, stop_node=None):
+    """Join every type specifier/qualifier child of ``container`` up to (but not
+    including) the declarator into a single type string.
+
+    Storage-class specifiers (``static``/``extern``/``register``…) are skipped —
+    they are captured separately where needed and are not part of the type.
+    ``stop_node`` lets callers halt at an explicit declarator whose node type is
+    not a declarator token (e.g. a typedef's name is a ``type_identifier``, which
+    is otherwise indistinguishable from a base-type reference).
+    Returns an empty string if nothing type-like precedes the declarator.
+    """
+    parts = []
+    for ch in container.children:
+        if stop_node is not None and ch.start_byte >= stop_node.start_byte:
+            break
+        if ch.type in _DECLARATOR_START:
+            break
+        if ch.type in _LEADING_TYPE_SKIP:
+            continue
+        t = node_text(ch, code)
+        if t:
+            parts.append(t)
+    return " ".join(parts)
+
+
+def _append_pointer_stars(type_str, declarator_node):
+    """Append one ``*`` per pointer-declarator level, matching the historical
+    ``get_full_return_type`` behaviour used for globals and return types."""
+    ptr_node = declarator_node
+    while ptr_node and ptr_node.type == "pointer_declarator":
+        type_str += " *"
+        ptr_node = ptr_node.child_by_field_name("declarator")
+    return type_str
+
+
+def _bitfield_width(field_node, code):
+    """Return the width (as a string) of a struct bitfield member, or None.
+
+    ``unsigned int flags : 3;`` carries a ``bitfield_clause`` child holding the
+    ``: width`` — dropped entirely by the plain declarator/type extraction."""
+    for ch in field_node.children:
+        if ch.type == "bitfield_clause":
+            for inner in ch.children:
+                if inner.type not in (":",):
+                    txt = node_text(inner, code)
+                    if txt:
+                        return txt
+    return None
+
+
+# C23 lets an enum fix its underlying type: ``enum E : uint8_t { … }``.
+# tree-sitter's C grammar doesn't understand the ``: type`` clause; the parse
+# error cascades and the *entire* enum is mis-recovered as a function
+# definition, so every enumerator is lost. We blank the ``: type`` clause out
+# (replacing it with spaces so byte offsets and line numbers are preserved) and
+# remember each enum's underlying type, keyed by the byte offset of its ``enum``
+# keyword — which is exactly the ``enum_specifier`` node's ``start_byte``.
+_ENUM_UNDERLYING_RE = re.compile(rb"\benum\b(?:\s+[A-Za-z_]\w*)?\s*(:[^{;]+?)\s*(?=[{;])")
+
+
+def _neutralize_enum_underlying(code: bytes):
+    underlying = {}
+    out = bytearray(code)
+    for m in _ENUM_UNDERLYING_RE.finditer(code):
+        clause = m.group(1)  # e.g. b": page_flags_t"
+        underlying[m.start()] = clause[1:].strip().decode("utf-8", "replace")
+        for i in range(m.start(1), m.end(1)):
+            if out[i] not in (0x0A, 0x0D):  # keep newlines so line numbers hold
+                out[i] = 0x20
+    return bytes(out), underlying
 
 
 # ---------------------------------------------------------------------------
@@ -403,11 +517,14 @@ def collect_struct_recursive(node, code, seen_ids=None):
             decl_node = field.child_by_field_name("declarator")
 
             m_name = node_text(decl_node, code)
-            m_type_text = node_text(type_node, code)
+            # Full type text, keeping leading qualifiers (const/volatile/_Atomic…)
+            # that the bare ``type`` field drops; fall back to the plain field.
+            m_type_text = _leading_type_text(field, code) or node_text(type_node, code)
 
             member = {
                 "name": m_name,
                 "type": m_type_text,
+                "bitfield": _bitfield_width(field, code),
                 "line": field.start_point[0] + 1,
                 "index": idx,
                 "nested": None,
@@ -483,9 +600,10 @@ def extract_fn_ptr_info(type_node, declarator_node, code):
     if params_node:
         for p in params_node.children:
             if p.type == "parameter_declaration":
-                p_type_node = p.child_by_field_name("type")
                 p_decl_node = p.child_by_field_name("declarator")
-                p_type = node_text(p_type_node, code) or ""
+                p_type = _leading_type_text(p, code) or node_text(
+                    p.child_by_field_name("type"), code
+                ) or ""
                 p_name = node_text(p_decl_node, code)
                 # strip pointer stars from declarator into the type
                 ptr_node = p_decl_node
@@ -503,6 +621,10 @@ def extract_fn_ptr_info(type_node, declarator_node, code):
 def parse_c_types_and_functions(filename):
 
     code = Path(filename).read_bytes()
+    # Blank out C23 enum underlying-type clauses (``enum E : uint8_t``) so
+    # tree-sitter parses the enum body instead of mis-recovering it as a
+    # function; remember each underlying type keyed by the enum's start byte.
+    code, enum_underlying = _neutralize_enum_underlying(code)
     tree = parser.parse(code)
     root = tree.root_node
 
@@ -547,7 +669,7 @@ def parse_c_types_and_functions(filename):
 
             if decl and is_function_prototype(decl):
                 name, params = extract_function_name_and_params(decl, code)
-                ret_type = get_full_return_type(type_node, decl, code)
+                ret_type = get_full_return_type(node, type_node, decl, code)
 
                 functions.append(
                     {
@@ -569,7 +691,7 @@ def parse_c_types_and_functions(filename):
                 # variable — so those are excluded by the guard above and the
                 # struct is recorded via its own specifier branch.)
                 var_name = _declarator_name(decl, code)
-                var_type = get_full_return_type(type_node, decl, code)
+                var_type = get_full_return_type(node, type_node, decl, code)
                 raw_text = node_text(node, code)
                 on_macro_line = (node.start_point[0] + 1) in macro_lines
                 if (
@@ -621,7 +743,14 @@ def parse_c_types_and_functions(filename):
                 recorded_enum_ids.add(nid)
                 name = node_text(node.child_by_field_name("name"), code)
                 members = collect_enum_members(body, code)
-                enums.append({"name": name, "members": members, "line": node.start_point[0] + 1})
+                enums.append(
+                    {
+                        "name": name,
+                        "underlying_type": enum_underlying.get(node.start_byte),
+                        "members": members,
+                        "line": node.start_point[0] + 1,
+                    }
+                )
 
         elif node.type == "type_definition":
 
@@ -651,6 +780,7 @@ def parse_c_types_and_functions(filename):
                         enums.append(
                             {
                                 "name": ename,
+                                "underlying_type": enum_underlying.get(type_node.start_byte),
                                 "members": emembers,
                                 "line": type_node.start_point[0] + 1,
                             }
@@ -659,7 +789,7 @@ def parse_c_types_and_functions(filename):
             typedefs.append(
                 {
                     "name": extract_typedef_name(decl, code),
-                    "type": get_typedef_type(type_node, decl, code),
+                    "type": get_typedef_type(node, type_node, decl, code),
                     "fn_ptr": extract_fn_ptr_info(type_node, decl, code),
                     "line": node.start_point[0] + 1,
                 }

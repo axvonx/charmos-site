@@ -367,6 +367,171 @@ class TestEnumParsing:
         assert len(enums) == 0
 
 
+class TestEnumUnderlyingType:
+    """C23 ``enum E : underlying_type { … }``. tree-sitter's C grammar doesn't
+    understand the ``: type`` clause and mis-recovers the whole enum as a
+    function definition, dropping every enumerator — so the parser neutralizes
+    the clause before parsing and records the underlying type separately."""
+
+    def test_underlying_type_enum_members_recovered(self):
+        code = """\
+enum demand_page_flags : page_flags_t {
+    DEMAND_PAGE_FLAG_NONE = 1,
+    DEMAND_PAGE_FLAG_ZERO_MEMORY = 2,
+    DEMAND_PAGE_FLAG_WRITABLE = 1 << 3,
+};
+"""
+        result = parse_code(code)
+        enums = result["types"]["enums"]
+        assert len(enums) == 1
+        assert enums[0]["name"] == "demand_page_flags"
+        assert enums[0]["underlying_type"] == "page_flags_t"
+        names = [m["name"] for m in enums[0]["members"]]
+        assert names == [
+            "DEMAND_PAGE_FLAG_NONE",
+            "DEMAND_PAGE_FLAG_ZERO_MEMORY",
+            "DEMAND_PAGE_FLAG_WRITABLE",
+        ]
+        # The enum must NOT leak out as a phantom function.
+        assert not any(f["name"] == "page_flags_t" for f in result["functions"])
+
+    def test_underlying_type_values_preserved(self):
+        code = "enum e : unsigned int { A = 1, B = 1 << 4 };"
+        result = parse_code(code)
+        members = result["types"]["enums"][0]["members"]
+        assert result["types"]["enums"][0]["underlying_type"] == "unsigned int"
+        assert members[0]["value"] == "1"
+        assert members[1]["value"] == "1 << 4"
+
+    def test_plain_enum_has_null_underlying(self):
+        code = "enum color { RED, GREEN };"
+        result = parse_code(code)
+        assert result["types"]["enums"][0]["underlying_type"] is None
+
+    def test_typedef_enum_with_underlying_type(self):
+        code = "typedef enum status : uint8_t { OK, ERR } status_t;"
+        result = parse_code(code)
+        enums = result["types"]["enums"]
+        assert len(enums) == 1
+        assert enums[0]["name"] == "status"
+        assert enums[0]["underlying_type"] == "uint8_t"
+        assert [m["name"] for m in enums[0]["members"]] == ["OK", "ERR"]
+        assert any(t["name"] == "status_t" for t in result["types"]["typedefs"])
+
+    def test_underlying_type_preserves_line_numbers(self):
+        # The neutralization must not shift byte offsets / line numbers.
+        code = "\n\nenum e : int {\n    A = 1,\n};\n"
+        result = parse_code(code)
+        assert result["types"]["enums"][0]["line"] == 3
+        assert result["types"]["enums"][0]["members"][0]["line"] == 4
+
+    def test_ternary_in_enum_value_not_mistaken_for_underlying(self):
+        # A ``:`` inside an enumerator value must not be treated as an underlying
+        # type clause (there is no ``: type`` between the name and ``{``).
+        code = "enum e { A = 1 ? 2 : 3, B };"
+        result = parse_code(code)
+        enums = result["types"]["enums"]
+        assert enums[0]["underlying_type"] is None
+        assert [m["name"] for m in enums[0]["members"]] == ["A", "B"]
+
+
+# ── Struct member qualifiers / bitfields ─────────────────────────────────────
+
+
+class TestStructMemberBitfields:
+    def test_bitfield_width_captured(self):
+        code = "struct s { unsigned int a : 3; unsigned int b : 5; };"
+        result = parse_code(code)
+        members = result["types"]["structs"][0]["members"]
+        assert members[0]["name"] == "a"
+        assert members[0]["type"] == "unsigned int"
+        assert members[0]["bitfield"] == "3"
+        assert members[1]["bitfield"] == "5"
+
+    def test_non_bitfield_member_has_null_bitfield(self):
+        code = "struct s { int x; };"
+        result = parse_code(code)
+        assert result["types"]["structs"][0]["members"][0]["bitfield"] is None
+
+    def test_anonymous_bitfield_padding(self):
+        code = "struct s { unsigned int a : 1; unsigned int : 7; };"
+        result = parse_code(code)
+        members = result["types"]["structs"][0]["members"]
+        # Both the named field and the anonymous padding carry their widths.
+        widths = [m["bitfield"] for m in members]
+        assert "1" in widths
+        assert "7" in widths
+
+
+class TestStructMemberQualifiers:
+    """Leading type qualifiers/specifiers sit as sibling nodes of the bare
+    ``type`` field; grabbing only that field silently drops them."""
+
+    def test_const_pointer_member_keeps_const(self):
+        code = "struct s { const char *name; };"
+        result = parse_code(code)
+        m = result["types"]["structs"][0]["members"][0]
+        assert m["type"] == "const char"
+
+    def test_const_volatile_restrict_member(self):
+        code = "struct s { const volatile int * restrict p; };"
+        result = parse_code(code)
+        m = result["types"]["structs"][0]["members"][0]
+        assert m["type"] == "const volatile int"
+
+    def test_atomic_qualifier_member(self):
+        code = "struct s { int _Atomic counter; };"
+        result = parse_code(code)
+        m = result["types"]["structs"][0]["members"][0]
+        assert "_Atomic" in m["type"]
+        assert m["name"] == "counter"
+
+    def test_plain_member_type_unchanged(self):
+        code = "struct s { unsigned long len; };"
+        result = parse_code(code)
+        m = result["types"]["structs"][0]["members"][0]
+        assert m["type"] == "unsigned long"
+        assert m["name"] == "len"
+
+
+class TestQualifiersElsewhere:
+    """Qualifier-awareness also applies to globals, typedefs, and parameters."""
+
+    def test_typedef_keeps_const(self):
+        code = "typedef const int ci_t;"
+        result = parse_code(code)
+        t = result["types"]["typedefs"][0]
+        assert t["name"] == "ci_t"
+        assert t["type"] == "const int"
+
+    def test_global_keeps_qualifiers(self):
+        code = "extern const int * restrict gp;"
+        result = parse_code(code)
+        g = result["types"]["globals"][0]
+        assert g["name"] == "gp"
+        assert "const int" in g["type"]
+
+    def test_prototype_param_keeps_const(self):
+        code = "void f(const int *p, volatile unsigned long x);"
+        result = parse_code(code)
+        params = result["functions"][0]["parameters"]
+        assert params[0]["type"] == "const int"
+        assert params[1]["type"] == "volatile unsigned long"
+
+    def test_prototype_return_type_keeps_const(self):
+        code = "const char *version(void);"
+        result = parse_code(code)
+        assert result["functions"][0]["return_type"] == "const char *"
+
+    def test_fn_ptr_typedef_param_keeps_const(self):
+        code = "typedef int (*cmp)(const void *a, const void *b);"
+        result = parse_code(code)
+        fn = result["types"]["typedefs"][0]["fn_ptr"]
+        assert fn is not None
+        assert fn["parameters"][0]["type"] == "const void *"
+        assert fn["parameters"][1]["type"] == "const void *"
+
+
 # ── Typedef parsing ──────────────────────────────────────────────────────────
 
 

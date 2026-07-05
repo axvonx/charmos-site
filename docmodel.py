@@ -38,6 +38,7 @@ class Field:
     type: str = ""
     name: str = ""
     offset: int | None = None
+    bitfield: str | None = None
     nested: Composite | None = None
 
     @classmethod
@@ -47,6 +48,7 @@ class Field:
             type=d.get("type") or "",
             name=d.get("name") or "",
             offset=d.get("offset"),
+            bitfield=d.get("bitfield"),
             nested=Composite.from_nested(nested) if nested else None,
         )
 
@@ -93,6 +95,7 @@ class EnumMember:
 @dataclass
 class Enum:
     name: str = ""
+    underlying: str | None = None
     line: int | None = None
     members: list[EnumMember] = field(default_factory=list)
 
@@ -100,6 +103,7 @@ class Enum:
     def from_dict(cls, d: dict) -> Enum:
         return cls(
             name=d.get("name") or "",
+            underlying=d.get("underlying_type"),
             line=d.get("line"),
             members=[EnumMember.from_dict(m) for m in d.get("members", [])],
         )
