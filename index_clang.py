@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import os
 import sys
@@ -185,48 +186,91 @@ class SymbolIndex:
 # ── indexing ─────────────────────────────────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=None)
+def _resolve(path: str) -> Path:
+    # Path.resolve() hits the filesystem; called per AST node it dominated the
+    # index time, but a TU only ever mentions a few hundred distinct files.
+    return Path(path).resolve()
+
+
 def _within_root(path: str | None, root: Path | None) -> bool:
     if path is None:
         return False
     if root is None:
         return True
+    return _rel_or_none(path, root) is not None
+
+
+@functools.lru_cache(maxsize=None)
+def _rel_or_none(path: str, root: Path) -> str | None:
     try:
-        Path(path).resolve().relative_to(root)
-        return True
+        return str(_resolve(path).relative_to(root))
     except ValueError:
-        return False
+        return None
 
 
 def _rel(path: str, root: Path | None) -> str:
     if root is None:
-        return str(Path(path).resolve())
-    try:
-        return str(Path(path).resolve().relative_to(root))
-    except ValueError:
-        return str(Path(path).resolve())
+        return str(_resolve(path))
+    return _rel_or_none(path, root) or str(_resolve(path))
 
 
-def _walk(cursor, index: SymbolIndex, root: Path | None) -> None:
+def _walk(
+    cursor,
+    index: SymbolIndex,
+    root: Path | None,
+    seen: set[tuple] | None = None,
+) -> None:
+    """Index a TU. ``seen`` (shared across the TUs one worker parses) identifies
+    every top-level header declaration already walked: a shared header's
+    declarations are identical in every TU that includes it, so each is walked
+    once per worker instead of once per including TU. The main file is never
+    deduped — its content is unique to this TU. Keying on offset (not just
+    file) keeps #ifdef variants of a header correct."""
+    main_file = cursor.spelling
+    for top in cursor.get_children():
+        loc = top.location
+        if seen is not None and loc.file is not None and loc.file.name != main_file:
+            # One macro call can expand to several declarations sharing a
+            # location, so identity and extent are part of the key too.
+            key = (
+                loc.file.name,
+                loc.offset,
+                top.extent.end.offset,
+                top.kind.value,
+                top.get_usr() or top.spelling,
+                top.is_definition(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+        _walk_subtree(top, index, root)
+
+
+def _walk_subtree(cursor, index: SymbolIndex, root: Path | None) -> None:
     for node in cursor.walk_preorder():
+        kind = node.kind
+        if kind not in _DEF_KINDS and kind not in _REF_KINDS:
+            continue
         loc = node.location
         fname = loc.file.name if loc.file is not None else None
         if fname is None or not _within_root(fname, root):
             continue
 
-        if node.kind in _DEF_KINDS:
+        if kind in _DEF_KINDS:
             name = node.spelling
             if not name:
                 continue  # unnamed declaration — no linkable name
             # Anonymous records carry a synthetic spelling like
             # "union (unnamed at foo.h:27:5)"; they are not linkable symbols.
             if (
-                node.kind in (CursorKind.STRUCT_DECL, CursorKind.UNION_DECL, CursorKind.ENUM_DECL)
+                kind in (CursorKind.STRUCT_DECL, CursorKind.UNION_DECL, CursorKind.ENUM_DECL)
                 and node.is_anonymous()
             ):
                 continue
             # Only index file-scope variables; skip function locals, which are
             # not linkable API symbols and collide with real globals by name.
-            if node.kind == CursorKind.VAR_DECL:
+            if kind == CursorKind.VAR_DECL:
                 parent = node.semantic_parent
                 if parent is None or parent.kind != CursorKind.TRANSLATION_UNIT:
                     continue
@@ -238,7 +282,7 @@ def _walk(cursor, index: SymbolIndex, root: Path | None) -> None:
                 Symbol(
                     usr=usr,
                     name=name,
-                    kind=_KIND_LABEL.get(node.kind, node.kind.name.lower()),
+                    kind=_KIND_LABEL.get(kind, kind.name.lower()),
                     file=_rel(fname, root),
                     line=loc.line,
                     column=loc.column,
@@ -246,7 +290,7 @@ def _walk(cursor, index: SymbolIndex, root: Path | None) -> None:
                     is_definition=bool(node.is_definition()),
                 )
             )
-        elif node.kind in _REF_KINDS:
+        elif kind in _REF_KINDS:
             target = node.referenced
             if target is None:
                 continue
@@ -278,11 +322,17 @@ def index_files(
     idx = cindex.Index.create()
     # DETAILED_PROCESSING_RECORD is required to see macro definitions/uses.
     options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
+    seen: set[tuple] = set()
     for f in files:
         tu = idx.parse(str(f), args=args, options=options)
         _emit_diagnostics(tu, f)
-        _walk(tu.cursor, index, root_path)
+        _walk(tu.cursor, index, root_path, seen)
     return index
+
+
+# Top-level declarations this worker process has already walked (see _walk).
+# Per-process, so each worker still indexes every shared header once itself.
+_WORKER_SEEN: set[tuple] = set()
 
 
 def _index_one_tu(job):
@@ -298,7 +348,7 @@ def _index_one_tu(job):
             os.chdir(directory)
         tu = idx.parse(filename, args=args, options=options)
         local = SymbolIndex()
-        _walk(tu.cursor, local, root_path)
+        _walk(tu.cursor, local, root_path, _WORKER_SEEN)
     finally:
         os.chdir(prev)
     return list(local.symbols.values()), local.references
