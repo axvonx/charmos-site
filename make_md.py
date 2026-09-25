@@ -783,24 +783,33 @@ def linkify_code_fences(md: str) -> str:
 # When a Woboq source browser has been generated, symbols link into it
 # (/source/charmos/<file>.html#<line>); otherwise they fall back to GitHub blob.
 SOURCE_BROWSER_BASE = os.environ.get("CHARMOS_SOURCE_BROWSER")
+# On-disk project dir of the generated browser (…/public/source/charmos). Woboq
+# only emits pages for files it reached through a compiled TU, so a link is
+# only safe if its page exists here; otherwise we fall back to GitHub.
+SOURCE_BROWSER_DIR = os.environ.get("CHARMOS_SOURCE_BROWSER_DIR")
+
+
+def source_browser_href(rel, line=None):
+    """Code-browser URL for a repo-relative path, or None if it has no page."""
+    if not (SOURCE_BROWSER_BASE and rel):
+        return None
+    rel = rel[len("charmos/") :] if rel.startswith("charmos/") else rel
+    if SOURCE_BROWSER_DIR and not (Path(SOURCE_BROWSER_DIR) / f"{rel}.html").is_file():
+        return None
+    url = f"{SOURCE_BROWSER_BASE}/{rel}.html"
+    return f"{url}#{line}" if line is not None else url
 
 
 def source_def_href(data_file, line):
     """Link a construct's definition to the code browser (or GitHub blob)."""
     if not data_file:
         return None
-    if SOURCE_BROWSER_BASE:
-        rel = data_file[len("charmos/") :] if data_file.startswith("charmos/") else data_file
-        return f"{SOURCE_BROWSER_BASE}/{rel}.html#{line}"
-    return generate_github_link_safe(data_file, line)
+    return source_browser_href(data_file, line) or generate_github_link_safe(data_file, line)
 
 
 def source_browser_file_href(data_file):
     """File-level code-browser URL (no line anchor), or None if unavailable."""
-    if not (SOURCE_BROWSER_BASE and data_file):
-        return None
-    rel = data_file[len("charmos/") :] if data_file.startswith("charmos/") else data_file
-    return f"{SOURCE_BROWSER_BASE}/{rel}.html"
+    return source_browser_href(data_file)
 
 
 def page_source_header(data_file):
@@ -855,9 +864,10 @@ def symbol_target(sym, doc_table):
     for key in _doc_table_keys(kind, name):
         if key in doc_table:
             return doc_table[key]
-    if SOURCE_BROWSER_BASE:
-        return f"{SOURCE_BROWSER_BASE}/{sym['file']}.html#{sym['line']}"
-    return f"{SOURCE_REPO_URL}/{sym['file']}#L{sym['line']}"
+    return (
+        source_browser_href(sym["file"], sym["line"])
+        or f"{SOURCE_REPO_URL}/{sym['file']}#L{sym['line']}"
+    )
 
 
 def _make_code_renderer(doc_table):

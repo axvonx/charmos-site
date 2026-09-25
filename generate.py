@@ -364,6 +364,69 @@ def _localize_woboq_logos():
             html_path.write_text(new, encoding="utf-8")
 
 
+def _orphan_header_entries(entries, src_root, out_dir):
+    """compile_commands entries for documented headers Woboq didn't render.
+
+    Woboq only emits a page for a file some compiled TU reaches, so a header no
+    .c includes (e.g. mem/arena.h) gets no page — yet the docs link every
+    header in SOURCE_DIRS. Each orphan becomes its own TU, borrowing the flags
+    of a real kernel TU so its includes resolve.
+    """
+    template = next((e for e in entries if e.get("file", "").endswith(".c")), None)
+    if template is None:
+        return []
+    import shlex
+
+    args = template.get("arguments") or shlex.split(template["command"])
+    src = template["file"]
+    out = []
+    for dir_name in SOURCE_DIRS:
+        for header in sorted((src_root / dir_name).rglob("*.h")):
+            rel = header.relative_to(src_root).as_posix()
+            if (out_dir / SOURCE_BROWSER_PROJECT / f"{rel}.html").exists():
+                continue
+            argv = [str(header) if a == src else a for a in args]
+            if str(header) not in argv:
+                argv.append(str(header))
+            out.append({"directory": template["directory"], "file": str(header), "arguments": argv})
+    return out
+
+
+def _render_orphan_headers(gen, ccjson, src_root):
+    """Second Woboq pass over headers the main pass skipped. Woboq doesn't
+    regenerate files whose page already exists, so this only adds the missing
+    pages (and appends their refs). Returns how many headers were queued."""
+    import json
+
+    entries = _orphan_header_entries(
+        json.loads(ccjson.read_text()), src_root, SOURCE_BROWSER_OUT.resolve()
+    )
+    if not entries:
+        return 0
+    # A separate db dir: the main compile_commands.json also feeds the clang
+    # index, which must stay limited to real TUs.
+    orphan_db = CCDB_DIR / "woboq_orphans"
+    orphan_db.mkdir(parents=True, exist_ok=True)
+    (orphan_db / "compile_commands.json").write_text(json.dumps(entries, indent=1))
+    subprocess.run(
+        [
+            gen,
+            "-b",
+            str(orphan_db.resolve()),
+            "-a",
+            "-o",
+            str(SOURCE_BROWSER_OUT.resolve()),
+            "-p",
+            f"{SOURCE_BROWSER_PROJECT}:{src_root}",
+            "-d",
+            f"{SOURCE_BROWSER_URL}/data",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return len(entries)
+
+
 def build_source_browser():
     """Generate a Woboq clang cross-referenced source browser into site/public/source.
 
@@ -408,6 +471,10 @@ def build_source_browser():
         safe_print(c("  ⚠  source browser produced no output — skipping", YELLOW))
         end_step(t0, c("unavailable", YELLOW))
         return False
+
+    orphans = _render_orphan_headers(gen, ccjson, src_root)
+    if orphans:
+        safe_print(c(f"  ↳  rendered {orphans} header(s) no compiled TU includes", GRAY))
 
     idx = _resolve_tool(WOBOQ_IDX)
     if idx is not None:
@@ -848,6 +915,10 @@ def main():
         # Symbol links point into the source browser when it's available.
         if build_source_browser():
             os.environ["CHARMOS_SOURCE_BROWSER"] = f"{SOURCE_BROWSER_URL}/{SOURCE_BROWSER_PROJECT}"
+            # Lets make_md verify a page exists before linking it (GitHub fallback).
+            os.environ["CHARMOS_SOURCE_BROWSER_DIR"] = str(
+                (SOURCE_BROWSER_OUT / SOURCE_BROWSER_PROJECT).resolve()
+            )
     prepare_output_dirs()
     run_make_json()
     run_make_md()
