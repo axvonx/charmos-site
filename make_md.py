@@ -15,7 +15,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from docmodel import Composite, Enum, Field, Function, Module, Typedef, Variable
+from docmodel import Composite, Enum, Field, Function, Macro, Module, Typedef, Variable
 
 SOURCE_REPO_URL = "https://github.com/axvonx/charmos/blob/main"
 BUG_URL_BASE = "https://github.com/axvonx/charmos/issues"
@@ -709,6 +709,356 @@ def format_typedef_fn_ptr(t: Typedef, file: str | None) -> str:
     return fence_or_sourceblock(code, def_name=alias, def_href=source_def_href(file, t.line))
 
 
+# ── Rustdoc-style item rendering ──────────────────────────────────────────────
+#
+# Each reference item renders as: a compact signature *generated from the model*
+# (<ApiSig>, not a pasted code block), then its harvested comment docs as real
+# markdown, then tag notes, then — for structs/unions/enums — one <ApiMember>
+# row per field/variant carrying that member's own docs. Symbol links inside
+# signatures come from the same clang-index resolution SourceBlock uses; links
+# inside prose come from intra-doc links (`[`name`]`, `` `name` ``, `name()`).
+#
+# CHARMOS_DOC_STYLE=classic restores the previous one-code-block-per-item
+# layout (kept for side-by-side comparison while this is an experiment).
+
+DOC_STYLE = os.environ.get("CHARMOS_DOC_STYLE", "rustdoc")
+
+# callable(code, def_name) -> list[Segment]; set by generate_docs.
+_SEGMENTER = None
+# callable(name) -> href | None; set by generate_docs.
+_RESOLVE = None
+# Names the clang index knows as macros; set by generate_docs.
+_MACRO_NAMES: set[str] = set()
+
+_SIG_WRAP = 70  # wrap parameter lists past this width (≈ the content column in mono)
+_MACRO_INLINE_MAX = 60  # object-like macro values up to this length stay in the signature
+
+
+def _segments_json(code: str, def_name: str | None = None) -> str:
+    if _SEGMENTER is not None:
+        segs = _SEGMENTER(code, def_name)
+    else:
+        import sourceblock
+
+        segs = sourceblock.tokenize(code)
+    return json.dumps([s.to_dict() for s in segs], ensure_ascii=False)
+
+
+def api_sig(code: str, name: str | None, src: str | None, meta: str | None = None, body: str = "") -> str:
+    """An item box: generated declaration header + ``body`` (docs, notes) inside."""
+    attrs = f" segments={{{_segments_json(code, name)}}}"
+    if src:
+        attrs += f" src={json.dumps(src)}"
+    if meta:
+        attrs += f" meta={json.dumps(meta)}"
+    return f"<ApiSig{attrs}>\n\n{body}\n\n</ApiSig>" if body else f"<ApiSig{attrs} />"
+
+
+# Anchor ids already used on the page being rendered (reset per page), so
+# members that would collide — nested anonymous rows share an owner — get a
+# numeric suffix instead of silently shadowing each other.
+_PAGE_IDS: set[str] = set()
+
+
+def _member_id(prefix: str, owner: str, name: str) -> str:
+    # The declarator's own identifier: `(*const fn)(…)` → fn, `buf[N]` → buf,
+    # `*p` → p.
+    bare = re.sub(r"\b(const|volatile|restrict)\b", " ", name)  # `*const *p` → p
+    m = re.search(r"\(\s*\*\s*(\w+)", bare) or re.search(r"\w+", bare)
+    base = f"{prefix}-{owner}-{m.group(1 if m.re.groups else 0) if m else name}".lower()
+    id_, n = base, 2
+    while id_ in _PAGE_IDS:
+        id_, n = f"{base}-{n}", n + 1
+    _PAGE_IDS.add(id_)
+    return id_
+
+
+def _join_params(head: str, params: list[str], tail: str) -> str:
+    """``head(p, q)tail`` on one line, or one parameter per line past the wrap."""
+    one = f"{head}({', '.join(params)}){tail}"
+    if len(one) <= _SIG_WRAP or len(params) < 2:
+        return one
+    return f"{head}(\n" + "".join(f"    {p},\n" for p in params)[:-2] + f"\n){tail}"
+
+
+def _param_strs(params) -> list[str]:
+    out = []
+    for p in params:
+        t = (p.type or "").strip()
+        out.append(f"{t} {p.name}".strip() if p.name else t)
+    return out or ["void"]
+
+
+# -- prose ---------------------------------------------------------------------
+
+_FENCE_SPLIT_RE = re.compile(r"(^```.*?^```[ \t]*$)", re.M | re.S)
+_PROSE_TOKEN_RE = re.compile(
+    r"\[`?(?P<xname>[A-Za-z_]\w*)(?P<xcall>\(\))?`?\](?![(\[])"  # [`name`] intra-doc link
+    r"|`(?P<cname>[A-Za-z_]\w*)(?P<ccall>\(\))?`"  # `name` / `name()`
+    r"|(?P<code>`[^`\n]+`)"  # any other code span: verbatim
+    r"|\b(?P<bname>[A-Za-z_]\w*)\(\)"  # bare name() call
+    r"|(?P<brace>[{}])"
+    r"|(?P<lt><)"
+)
+_LIST_LINE_RE = re.compile(r"^\s*([-*+]|\d+[.)])\s")
+# A bare ---- / ==== line: a fraction bar or rule in a comment, but a setext
+# heading underline (or <hr>) to markdown.
+_RULE_ONLY_RE = re.compile(r"^(\s*)([-=_*]{3,})\s*$")
+NBSP = "\u00a0"
+
+
+def _link(name: str, call: str | None) -> str | None:
+    href = _RESOLVE(name) if _RESOLVE else None
+    return f"[`{name}{call or ''}`]({href})" if href else None
+
+
+def _prose_token(m: re.Match) -> str:
+    if m.group("xname"):
+        return _link(m.group("xname"), m.group("xcall")) or f"`{m.group('xname')}{m.group('xcall') or ''}`"
+    if m.group("cname"):
+        return _link(m.group("cname"), m.group("ccall")) or m.group(0)
+    if m.group("code"):
+        return m.group(0)
+    if m.group("bname"):
+        return _link(m.group("bname"), "()") or m.group(0)
+    if m.group("brace"):
+        return "\\" + m.group("brace")
+    return "&lt;"
+
+
+def _keep_layout(line: str) -> str:
+    """Make one prose line survive markdown as written (it renders monospace
+    with ``white-space: pre-wrap``): leading indentation → NBSP, since markdown
+    strips it from continuation lines and turns 4+ spaces into a code block;
+    a bare rule line is escaped so it stays a literal bar, not a heading."""
+    rule = _RULE_ONLY_RE.match(line)
+    if rule:
+        return rule.group(1).replace(" ", NBSP) + "\\" + rule.group(2)
+    if re.match(r"^\s*\*+[\s\-=]", line):
+        # A leading `*` survived margin stripping, so it is content (a legend
+        # symbol like `* - Unused`), never a bullet the author meant.
+        line = re.sub(r"^(\s*)(\*+)", lambda m: m.group(1) + "\\*" * len(m.group(2)), line)
+    if re.match(r"^\s*>", line):
+        # `>= 0x80` / `> 0` in a comment is a comparison, not a blockquote.
+        line = re.sub(r"^(\s*)>", r"\1\\>", line)
+    if re.match(r"^\s*\+\s", line):
+        # `+ term` in a comment is arithmetic continuation, not a bullet.
+        line = re.sub(r"^(\s*)\+", r"\1\\+", line)
+    stripped = line.lstrip(" ")
+    if stripped == line or _LIST_LINE_RE.match(line):
+        return line
+    return NBSP * (len(line) - len(stripped)) + stripped
+
+
+def doc_mdx(md: str) -> str:
+    """Harvested comment → MDX-safe markdown, wrapped in a monospace ``api-doc``.
+
+    The comment's own layout is kept (line breaks, indentation, rule lines);
+    fenced blocks pass through verbatim; in prose, symbols are linked, MDX
+    specials (``{ } <``) are escaped, and headings are demoted to bold labels
+    so item docs never leak into the page TOC."""
+    out = []
+    for chunk in _FENCE_SPLIT_RE.split(md):
+        if chunk.startswith("```"):
+            out.append(chunk)
+            continue
+        chunk = re.sub(r"(?m)^#{1,6}\s+(.+?)\s*#*\s*$", r"**\1**", chunk)
+        chunk = "\n".join(_keep_layout(ln) for ln in chunk.split("\n"))
+        out.append(_PROSE_TOKEN_RE.sub(_prose_token, chunk))
+    body = "".join(out).strip()
+    return f'<div class="api-doc">\n\n{body}\n\n</div>' if body else ""
+
+
+def notes_mdx(notes, file: str | None) -> str:
+    parts = []
+    for n in notes:
+        attrs = f' kind="{n.kind}" tag="{n.tag}"'
+        if n.sub:
+            attrs += f" sub={json.dumps(n.sub)}"
+        href = source_def_href(file, n.line) if n.line else None
+        if href:
+            attrs += f" href={json.dumps(href)}"
+        body = doc_mdx(n.text) if n.text else ""
+        # A bare `TODO:` still marks the spot; show just the tag.
+        parts.append(f"<ApiNote{attrs}>\n\n{body}\n\n</ApiNote>" if body else f"<ApiNote{attrs} />")
+    return "\n\n".join(parts)
+
+
+def _docs_block(item, file: str | None) -> str:
+    parts = []
+    if item.doc:
+        parts.append(doc_mdx(item.doc))
+    if item.notes:
+        parts.append(notes_mdx(item.notes, file))
+    return "\n\n".join(parts)
+
+
+def group_label(item) -> str:
+    """A short comment heading a run of items, shown above the run's first item."""
+    if not getattr(item, "group", ""):
+        return ""
+    import html
+
+    return f'<p class="api-group">{html.escape(item.group).replace("{", "&#123;").replace("}", "&#125;")}</p>'
+
+
+def _member(id_: str, code: str, body: str, name: str | None = None) -> str:
+    seg = _segments_json(code, name)
+    inner = f"\n\n{body}\n\n" if body else ""
+    return f'<ApiMember id="{id_}" segments={{{seg}}}>{inner}</ApiMember>'
+
+
+def api_decl(head: str, name: str, count: str, src: str | None, meta: str | None, body: list[str]) -> str:
+    """The collapsible struct/union/enum box: header ``struct x``, then the
+    item's docs and member rows inside; ``(N fields)`` shows while collapsed."""
+    attrs = f" segments={{{_segments_json(head, name)}}} count={json.dumps(count)}"
+    if src:
+        attrs += f" src={json.dumps(src)}"
+    if meta:
+        attrs += f" meta={json.dumps(meta)}"
+    inner = "\n\n".join(x for x in body if x)
+    return f"<ApiDecl{attrs}>\n\n{inner}\n\n</ApiDecl>" if inner else f"<ApiDecl{attrs} />"
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
+
+
+# -- items ---------------------------------------------------------------------
+#
+# Declarations here are documentation, not source: no braces, no trailing ;/,.
+
+
+def _field_rows(members, owner: str, file: str | None) -> list[str]:
+    rows = []
+    for i, m in enumerate(members):
+        name = (m.name or "").strip().replace("\n", "")
+        docs = _docs_block(m, file)
+        # Unnamed nested composites get a positional id so anchors stay unique.
+        id_ = _member_id("field", owner, name or f"anon{i}")
+        if label := group_label(m):
+            rows.append(label)
+        if m.nested:
+            # A nested anonymous struct/union: `union name`, its members inside.
+            # `struct { … } __packed;` parses with the attribute macro as the
+            # member name, so a "name" that is a macro means unnamed.
+            if name in _MACRO_NAMES:
+                name = ""
+                id_ = _member_id("field", owner, f"anon{i}")
+            inner = _field_rows(m.nested.members, owner, file)
+            head = m.nested.kind + (f" {name}" if name else "")
+            rows.append(_member(id_, head, "\n\n".join(x for x in (docs, *inner) if x)))
+        else:
+            bit = f" : {m.bitfield}" if m.bitfield else ""
+            rows.append(_member(id_, f"{(m.type or '').strip()} {name}{bit}", docs))
+    return rows
+
+
+def render_composite(s: Composite, file: str | None) -> str:
+    return api_decl(
+        f"{s.kind} {s.name}",
+        s.name,
+        _plural(len(s.members), "field"),
+        source_def_href(file, s.line),
+        f"{s.size} bytes" if s.size is not None else None,
+        [_docs_block(s, file), *_field_rows(s.members, s.name, file)],
+    )
+
+
+def render_enum(e: Enum, file: str | None) -> str:
+    under = f" : {e.underlying}" if e.underlying else ""
+    rows = []
+    for m in e.members:
+        if label := group_label(m):
+            rows.append(label)
+        rows.append(
+            _member(
+                _member_id("variant", e.name, m.name),
+                f"{m.name} = {m.value}" if m.value is not None else m.name,
+                _docs_block(m, file),
+                m.name,
+            )
+        )
+    return api_decl(
+        f"enum {e.name}{under}",
+        e.name,
+        _plural(len(e.members), "variant"),
+        source_def_href(file, e.line),
+        None,
+        [_docs_block(e, file), *rows],
+    )
+
+
+def render_typedef(t: Typedef, file: str | None) -> str:
+    if t.fn_ptr:
+        ret = (t.fn_ptr.return_type or "void").strip()
+        code = _join_params(f"typedef {ret} (*{t.name})", _param_strs(t.fn_ptr.parameters), "")
+    else:
+        # `typedef struct { … } name`: the body (with its comments) would
+        # otherwise be pasted into the header verbatim.
+        body_free = re.sub(r"\{.*\}", "{ … }", (t.type or "").strip(), flags=re.S)
+        code = f"typedef {body_free} {t.name}"
+    return _item(code, t, file)
+
+
+def is_phantom(item) -> bool:
+    """Attribute macros misparsed as items: `struct x { … } cc_aligned(64);`
+    parses as a function whose "return type" is the struct body, and a trailing
+    `cc_noreturn cc_cold;` as a variable made only of macro names."""
+    if isinstance(item, Function):
+        return "{" in (item.return_type or "")
+    if isinstance(item, Variable):
+        words = re.findall(r"\w+", f"{item.type} {item.name}")
+        return bool(words) and all(w in _MACRO_NAMES for w in words)
+    return False
+
+
+def render_function(f: Function, file: str | None) -> str:
+    quals = (" ".join(f.qualifiers) + " ") if f.qualifiers else ""
+    ret = (f.return_type or "void").strip()
+    code = _join_params(f"{quals}{ret} {f.name}", _param_strs(f.parameters), "")
+    return _item(code, f, file)
+
+
+def render_variable(g: Variable, file: str | None) -> str:
+    raw = re.sub(r"\s+", " ", (g.raw_text or "").strip())
+    raw = re.split(r"\s=\s", raw, maxsplit=1)[0].rstrip(";").strip()
+    if not raw:
+        raw = " ".join(x for x in ((g.storage or "").strip(), (g.type or "").strip(), g.name) if x)
+    return _item(raw, g, file)
+
+
+def render_macro(d: Macro, file: str | None) -> str:
+    value = re.sub(r"\s+", " ", (d.value or "")).strip()
+    head = f"#define {d.name}{d.params or ''}"
+    # d.multiline is unreliable (tree-sitter's node text always ends in "\n");
+    # judge by the source text itself.
+    multiline = "\n" in (d.raw_text or "").strip()
+    inline = not multiline and len(value) <= _MACRO_INLINE_MAX and d.params is None
+    code = f"{head} {value}".rstrip() if inline else head
+    expansion = ""
+    if not inline and (value or d.raw_text):
+        body = re.sub(r"[ \t]+\\(\r?\n)", r" \\\1", (d.raw_text or "").strip()) or f"{head} {value}"
+        expansion = (
+            '<details class="api-expansion">\n<summary>Expansion</summary>\n\n'
+            + fence_or_sourceblock(body, def_name=d.name, def_href=None)
+            + "\n\n</details>"
+        )
+    return _item(code, d, file, extra=expansion)
+
+
+def _item(code: str, item, file: str | None, extra: str = "") -> str:
+    body = "\n\n".join(x for x in (_docs_block(item, file), extra) if x)
+    return api_sig(code, item.name, source_def_href(file, item.line), body=body)
+
+
+def module_docs_mdx(module: Module) -> str:
+    """Page-level docs: the file header comment, plus tags about the file as a
+    whole (in its header, or with no declaration after them)."""
+    parts = [doc_mdx(module.doc) if module.doc else "", notes_mdx(module.notes, module.file)]
+    return "\n\n".join(x for x in parts if x)
+
+
 # ── SourceBlock code rendering ────────────────────────────────────────────────
 #
 # When a clang-accurate symbol index is available, C code blocks are rendered as
@@ -928,10 +1278,46 @@ def assemble_page_text(title, author, status, badge, body, slug=None):
     fm.append("---")
 
     imports = list(_STARLIGHT_IMPORTS)
+    if DOC_STYLE != "classic":
+        imports += [
+            "import ApiSig from '@components/ApiSig.astro';",
+            "import ApiDecl from '@components/ApiDecl.astro';",
+            "import ApiMember from '@components/ApiMember.astro';",
+            "import ApiNote from '@components/ApiNote.astro';",
+        ]
     if _CODE_RENDERER is not None:
         imports.append("import SourceBlock from '@components/SourceBlock.astro';")
 
     return "\n".join(fm) + "\n\n" + "\n".join(imports) + "\n\n" + body
+
+
+def _install_resolver(doc_table):
+    """Wire the clang-index link resolution into the rustdoc renderer: signature
+    segments (an item's own name stays unlinked — the "source" link covers it)
+    and prose intra-doc links. Without an index, signatures render unlinked."""
+    global _SEGMENTER, _RESOLVE, _MACRO_NAMES
+    _SEGMENTER, _RESOLVE, _MACRO_NAMES = None, None, set()
+    if not CLANG_INDEX_PATH.exists():
+        return
+    try:
+        import sourceblock
+
+        index = json.loads(CLANG_INDEX_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    resolve = sourceblock.index_resolver(index, lambda sym: symbol_target(sym, doc_table))
+
+    def segment(code, def_name=None):
+        segs = sourceblock.render(code, resolve)
+        for seg in segs:
+            if def_name and seg.text == def_name and seg.cls in ("ident", "type", "field"):
+                seg.href = seg.symbol = None
+                seg.cls = "ident"
+                break
+        return segs
+
+    _SEGMENTER, _RESOLVE = segment, resolve
+    _MACRO_NAMES = {sym["name"] for sym in index["symbols"].values() if sym.get("kind") == "macro"}
 
 
 def generate_docs(json_dir: Path):
@@ -939,6 +1325,7 @@ def generate_docs(json_dir: Path):
     ideas, c_parse_map = load_json_dir(json_dir)
     doc_table = build_type_doc_table(c_parse_map, DOCS_ROOT)
     _CODE_RENDERER = _make_code_renderer(doc_table)
+    _install_resolver(doc_table)
     # Single source of truth for directory labels + URL slugs (see
     # build_dir_label_map). Pages are written into label-named directories and
     # carry an explicit `slug:`, so there is no separate on-disk rename pass.
@@ -1102,53 +1489,69 @@ def generate_docs(json_dir: Path):
                     return
                 lines.append(f"## {title}\n")
                 for it in items:
+                    if DOC_STYLE != "classic" and (label := group_label(it)):
+                        lines.append(label + "\n")
                     lines.append(f"### {item_kind(it)} {it.name}\n")
                     lines.append(render_one(it))
                     lines.append("\n")
 
+            rustdoc = DOC_STYLE != "classic"
             emit_section(
                 "Structs",
                 module.structs,
                 lambda s: (s.kind or "struct").lower(),
-                lambda s: format_struct_as_c_code(s, module.file),
+                lambda s: (render_composite if rustdoc else format_struct_as_c_code)(s, module.file),
             )
             emit_section(
                 "Unions",
                 module.unions,
                 lambda s: "union",
-                lambda s: format_struct_as_c_code(s, module.file),
+                lambda s: (render_composite if rustdoc else format_struct_as_c_code)(s, module.file),
             )
             emit_section(
                 "Enums",
                 module.enums,
                 lambda e: "enum",
-                lambda e: format_enum_as_c_code(e, module.file),
+                lambda e: (render_enum if rustdoc else format_enum_as_c_code)(e, module.file),
             )
             emit_section(
                 "Type Aliases",
                 module.typedefs,
                 lambda t: "type alias",
-                lambda t: format_typedef_fn_ptr(t, module.file),
+                lambda t: (render_typedef if rustdoc else format_typedef_fn_ptr)(t, module.file),
             )
             emit_section(
                 "Functions",
                 module.functions,
                 lambda f: "function",
-                lambda f: format_function_signature(f, module.file),
+                lambda f: (render_function if rustdoc else format_function_signature)(f, module.file),
             )
             emit_section(
                 "Variables",
                 module.variables,
                 lambda g: "variable",
-                lambda g: format_global_as_c_code(g, module.file),
+                lambda g: (render_variable if rustdoc else format_global_as_c_code)(g, module.file),
             )
+            if rustdoc:
+                emit_section("Macros", module.macros, lambda d: "macro", lambda d: render_macro(d, module.file))
 
             return lines
 
         module = Module.from_json(data)
+        _PAGE_IDS.clear()
+        if DOC_STYLE != "classic":
+            module.functions = [f for f in module.functions if not is_phantom(f)]
+            module.variables = [g for g in module.variables if not is_phantom(g)]
         file_md_lines = collect_markdown_lines(module)
-        combined_lines.extend(file_md_lines)
-        combined_lines = append_defines_to_md(combined_lines, module)
+        if DOC_STYLE != "classic":
+            # Module docs + file-level tags sit directly under the page header,
+            # ahead of ideas and items (rustdoc's crate/module docs).
+            if mod_doc := module_docs_mdx(module):
+                combined_lines.insert(1, mod_doc + "\n")
+            combined_lines.extend(file_md_lines)
+        else:
+            combined_lines.extend(file_md_lines)
+            combined_lines = append_defines_to_md(combined_lines, module)
 
         # Write combined Markdown to single file
         body = "\n".join(combined_lines)

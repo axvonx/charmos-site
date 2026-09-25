@@ -1,0 +1,36 @@
+---
+/**
+ * ApiDecl — a struct/union/enum as one collapsible box: the header names it
+ * (`struct watchdog_percpu`), and the body holds the item's docs and notes,
+ * then one ApiMember per field/variant with its comment underneath. Collapsed,
+ * the header shows the member count instead. It is documentation, not source,
+ * so there are no braces.
+ */
+import type { Segment } from "./SourceBlock.astro";
+import Tokens from "./Tokens.astro";
+
+interface Props {
+  /** The header, e.g. `struct x`. */
+  segments: Segment[];
+  /** Shown only while collapsed, e.g. `8 fields`. */
+  count: string;
+  src?: string;
+  meta?: string;
+  open?: boolean;
+}
+
+const { segments, count, src, meta, open = true } = Astro.props;
+---
+
+<details class="api-item api-decl" open={open}>
+  <summary class="api-item__head api-decl__head">
+    <code class="api-code api-item__sig"><Tokens segments={segments} /><span class="api-decl__count"> ({count})</span></code>
+    {(meta || src) && (
+      <span class="api-sig__aside">
+        {meta && <span class="api-sig__meta">{meta}</span>}
+        {src && <a class="api-sig__src" href={src}>source</a>}
+      </span>
+    )}
+  </summary>
+  <div class="api-item__body"><slot /></div>
+</details>

@@ -20,6 +20,32 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class Note:
+    """A tag-led comment paragraph (``TODO:``, ``XXX(sched):`` …); see
+    doccomments.py. ``kind`` is the canonical tag, ``tag`` as written."""
+
+    kind: str = "NOTE"
+    tag: str = "NOTE"
+    sub: str | None = None
+    text: str = ""
+    line: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Note:
+        return cls(
+            kind=d.get("kind") or "NOTE",
+            tag=d.get("tag") or d.get("kind") or "NOTE",
+            sub=d.get("sub"),
+            text=d.get("text") or "",
+            line=d.get("line"),
+        )
+
+
+def _notes(d: dict) -> list[Note]:
+    return [Note.from_dict(n) for n in d.get("notes") or []]
+
+
+@dataclass
 class Param:
     """A function (or function-pointer) parameter."""
 
@@ -39,7 +65,11 @@ class Field:
     name: str = ""
     offset: int | None = None
     bitfield: str | None = None
+    line: int | None = None
     nested: Composite | None = None
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Field:
@@ -49,7 +79,11 @@ class Field:
             name=d.get("name") or "",
             offset=d.get("offset"),
             bitfield=d.get("bitfield"),
+            line=d.get("line"),
             nested=Composite.from_nested(nested) if nested else None,
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
 
@@ -62,6 +96,9 @@ class Composite:
     size: int | None = None
     line: int | None = None
     members: list[Field] = field(default_factory=list)
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Composite:
@@ -71,6 +108,9 @@ class Composite:
             size=d.get("size"),
             line=d.get("line"),
             members=[Field.from_dict(m) for m in d.get("members", [])],
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
     @classmethod
@@ -86,10 +126,21 @@ class Composite:
 class EnumMember:
     name: str = ""
     value: str | None = None
+    line: int | None = None
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> EnumMember:
-        return cls(name=d.get("name") or "", value=d.get("value"))
+        return cls(
+            name=d.get("name") or "",
+            value=d.get("value"),
+            line=d.get("line"),
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
+        )
 
 
 @dataclass
@@ -98,6 +149,9 @@ class Enum:
     underlying: str | None = None
     line: int | None = None
     members: list[EnumMember] = field(default_factory=list)
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Enum:
@@ -106,6 +160,9 @@ class Enum:
             underlying=d.get("underlying_type"),
             line=d.get("line"),
             members=[EnumMember.from_dict(m) for m in d.get("members", [])],
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
 
@@ -130,6 +187,9 @@ class Typedef:
     type: str = ""
     line: int | None = None
     fn_ptr: FnPtr | None = None
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Typedef:
@@ -139,6 +199,9 @@ class Typedef:
             type=d.get("type") or "",
             line=d.get("line"),
             fn_ptr=FnPtr.from_dict(fn_ptr) if fn_ptr else None,
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
 
@@ -149,6 +212,9 @@ class Function:
     parameters: list[Param] = field(default_factory=list)
     qualifiers: list[str] = field(default_factory=list)
     line: int | None = None
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Function:
@@ -158,6 +224,9 @@ class Function:
             parameters=[Param.from_dict(p) for p in d.get("parameters") or []],
             qualifiers=list(d.get("qualifiers") or []),
             line=d.get("line"),
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
 
@@ -170,6 +239,9 @@ class Variable:
     storage: str = ""
     raw_text: str = ""
     line: int | None = None
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Variable:
@@ -179,6 +251,9 @@ class Variable:
             storage=d.get("storage") or "",
             raw_text=d.get("raw_text") or "",
             line=d.get("line"),
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
 
@@ -194,6 +269,9 @@ class Macro:
     multiline: bool = False
     raw_text: str = ""
     line: int | None = None
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> Macro:
@@ -204,6 +282,9 @@ class Macro:
             multiline=bool(d.get("multiline", False)),
             raw_text=d.get("raw_text") or "",
             line=d.get("line"),
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
         )
 
 
@@ -226,6 +307,11 @@ class Module:
     functions: list[Function] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
     macros: list[Macro] = field(default_factory=list)
+    # Module-level docs (a leading comment before the first item) and tags
+    # that sit in no item's comment — see doccomments.attach.
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
 
     @classmethod
     def from_json(cls, data: dict) -> Module:
@@ -253,4 +339,6 @@ class Module:
             # Macros are rendered unfiltered (append_defines_to_md applies no
             # name filter), so keep every define here.
             macros=[Macro.from_dict(m) for m in c_parse.get("defines", [])],
+            doc=c_parse.get("module_doc") or "",
+            notes=[Note.from_dict(n) for n in c_parse.get("module_notes") or []],
         )

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from tree_sitter_language_pack import get_parser
 
+import doccomments
+
 FILE_TITLE_RE = re.compile(r"/\*\s*@title:\s*(.+?)\s*\*/", re.IGNORECASE | re.DOTALL)
 
 IDEA_REF_RE = re.compile(r'\]:\s*"([^"]+)"')
@@ -485,6 +487,29 @@ def collect_enum_members(body_node, code):
     return members
 
 
+# A declarator can never look like `NAME(args)`, so a member that does is an
+# attribute macro tree-sitter misparsed (`struct rbt tree TSA_GUARDED_BY(&l);`).
+_ATTR_CALL_RE = re.compile(r"^\s*[A-Za-z_]\w*\s*\(.*\)\s*$", re.S)
+
+
+def _repair_attribute_members(members):
+    """Undo tree-sitter's split of a trailing attribute macro on a field:
+    `type name ATTR(x)` arrives as type="type name", name="ATTR(x)" (the real
+    name moved into the type), and `type name[N] ATTR(x)` as an extra member
+    whose type is the attribute. Restore the name; drop attribute-only rows."""
+    out = []
+    for m in members:
+        name, typ = m.get("name") or "", m.get("type") or ""
+        if m.get("nested") is None and not name and _ATTR_CALL_RE.match(typ):
+            continue
+        if m.get("nested") is None and _ATTR_CALL_RE.match(name):
+            head, _, last = typ.rpartition(" ")
+            if head and re.fullmatch(r"\**\w+", last):
+                m["type"], m["name"] = head, last
+        out.append(m)
+    return out
+
+
 def collect_struct_recursive(node, code, seen_ids=None):
     """
     Recursively collect a struct/union node into a dict.
@@ -548,7 +573,7 @@ def collect_struct_recursive(node, code, seen_ids=None):
     result = {
         "name": name,
         "kind": kind,
-        "members": members,
+        "members": _repair_attribute_members(members),
         "line": node.start_point[0] + 1,
     }
     return result
@@ -618,6 +643,22 @@ def extract_fn_ptr_info(type_node, declarator_node, code):
     return {"return_type": ret_type.strip(), "parameters": parameters}
 
 
+# A comment trailing a one-line #define: tree-sitter keeps it inside the
+# macro's value (preproc_arg), so it is split off here and documented instead.
+_MACRO_TRAILING_COMMENT_RE = re.compile(r"\s*(//.*|/\*.*?\*/)\s*$")
+
+
+def _split_macro_comment(value: str, raw_full: str):
+    """(value without its trailing comment, the comment or None) for a
+    single-line macro; multi-line bodies are left alone."""
+    if "\n" in raw_full.strip():
+        return value, None
+    m = _MACRO_TRAILING_COMMENT_RE.search(value)
+    if not m:
+        return value, None
+    return value[: m.start()].rstrip(), m.group(1)
+
+
 def parse_c_types_and_functions(filename):
 
     code = Path(filename).read_bytes()
@@ -657,7 +698,10 @@ def parse_c_types_and_functions(filename):
             functions.append(
                 {
                     "name": name,
-                    "return_type": node_text(type_node, code),
+                    # The qualifier-aware walk, not just the ``type`` field: with
+                    # an attribute macro in front (`cc_no_asan void f()`), the
+                    # type field is the macro and the real type is lost.
+                    "return_type": get_full_return_type(node, type_node, decl, code),
                     "parameters": params,
                     "line": node.start_point[0] + 1,
                 }
@@ -805,14 +849,16 @@ def parse_c_types_and_functions(filename):
                 raw_full = node_raw_text(node, code) or ""
                 multiline = "\\" in raw_full or "\
 " in (code[node.start_byte : node.end_byte].decode("utf-8"))
+                raw_val, trailing = _split_macro_comment(raw_val or "", raw_full)
                 defines.append(
                     {
                         "name": def_name,
                         "params": None,
-                        "value": raw_val or "",
+                        "value": raw_val,
                         "raw_text": raw_full,
                         "multiline": multiline,
                         "line": node.start_point[0] + 1,
+                        "trailing_comment": trailing,
                     }
                 )
 
@@ -829,14 +875,16 @@ def parse_c_types_and_functions(filename):
                 raw_bytes = code[node.start_byte : node.end_byte].decode("utf-8")
                 multiline = "\\" in raw_full or "\
 " in raw_bytes
+                raw_val, trailing = _split_macro_comment(raw_val or "", raw_full)
                 defines.append(
                     {
                         "name": def_name,
                         "params": params_raw,
-                        "value": raw_val or "",
+                        "value": raw_val,
                         "raw_text": raw_full,
                         "multiline": multiline,
                         "line": node.start_point[0] + 1,
+                        "trailing_comment": trailing,
                     }
                 )
 
@@ -857,7 +905,7 @@ def parse_c_types_and_functions(filename):
 
     visit(root)
 
-    return {
+    type_info = {
         "functions": functions,
         "types": {
             "structs": structs,
@@ -867,6 +915,21 @@ def parse_c_types_and_functions(filename):
         },
         "defines": defines,
     }
+    # Attach the file's plain comments to the items above as their docs (see
+    # doccomments.py): leading/trailing comments → item docs, tags → notes.
+    comments = doccomments.collect_comments(root, code)
+    for d in defines:
+        if raw := d.pop("trailing_comment", None):
+            comments.append(doccomments.Comment(d["line"], d["line"], True, raw))
+    comments.sort(key=lambda c: c.start_line)
+    harvest = doccomments.attach(
+        comments,
+        doccomments.item_targets(type_info),
+        doccomments.item_bodies(type_info),
+    )
+    type_info["module_doc"] = harvest.module_doc
+    type_info["module_notes"] = [n.to_dict() for n in harvest.module_notes]
+    return type_info
 
 
 def extract_commits(md_text: str):

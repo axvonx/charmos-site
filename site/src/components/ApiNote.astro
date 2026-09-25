@@ -1,0 +1,26 @@
+---
+/**
+ * ApiNote — a tag-led comment (TODO:, XXX(sched):, …) surfaced from source.
+ * Kinds follow charmOS scripts/tagscan.py; WARN and BUG are the outward-facing
+ * ones and get the loud styling.
+ */
+interface Props {
+  kind: string;
+  tag: string;
+  sub?: string;
+  /** Source line of the tag. */
+  href?: string;
+}
+
+const { kind, tag, sub, href } = Astro.props;
+const label = sub ? `${tag}(${sub})` : tag;
+---
+
+<div class={`api-note api-note--${kind.toLowerCase()}`}>
+  {href ? (
+    <a class="api-note__tag" href={href}>{label}</a>
+  ) : (
+    <span class="api-note__tag">{label}</span>
+  )}
+  <div class="api-note__body"><slot /></div>
+</div>

@@ -1,0 +1,24 @@
+---
+/**
+ * ApiMember — one field/variant inside an ApiDecl, anchored, with its comment
+ * (the slot) directly underneath. A nested anonymous struct/union is a member
+ * whose slot holds its own members, indented.
+ */
+import type { Segment } from "./SourceBlock.astro";
+import Tokens from "./Tokens.astro";
+
+interface Props {
+  id: string;
+  segments: Segment[];
+}
+
+const { id, segments } = Astro.props;
+---
+
+<div class="api-member" id={id}>
+  <div class="api-member__head">
+    <a class="api-member__anchor" href={`#${id}`} aria-label="Link to this member">§</a>
+    <code class="api-code api-member__sig"><Tokens segments={segments} /></code>
+  </div>
+  <div class="api-member__body"><slot /></div>
+</div>

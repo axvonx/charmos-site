@@ -1,0 +1,34 @@
+---
+/**
+ * ApiSig — one documented item (function, typedef, variable, macro) as a
+ * single box: its declaration generated from the parsed model (not pasted
+ * source) with a right-aligned "source" link, and the item's comment docs and
+ * tag notes (the slot) folded in underneath.
+ */
+import type { Segment } from "./SourceBlock.astro";
+import Tokens from "./Tokens.astro";
+
+interface Props {
+  segments: Segment[];
+  /** Definition in the source browser / GitHub. */
+  src?: string;
+  /** Small right-aligned annotation. */
+  meta?: string;
+}
+
+const { segments, src, meta } = Astro.props;
+const hasBody = Astro.slots.has("default");
+---
+
+<div class="api-item">
+  <div class="api-item__head">
+    <pre class="api-code api-item__sig"><code><Tokens segments={segments} /></code></pre>
+    {(meta || src) && (
+      <span class="api-sig__aside">
+        {meta && <span class="api-sig__meta">{meta}</span>}
+        {src && <a class="api-sig__src" href={src}>source</a>}
+      </span>
+    )}
+  </div>
+  {hasBody && <div class="api-item__body"><slot /></div>}
+</div>

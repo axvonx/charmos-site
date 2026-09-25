@@ -1,0 +1,24 @@
+---
+/**
+ * Tokens — inline C tokens with clang-resolved links. The shared inner renderer
+ * of ApiSig / ApiMember: segments come from sourceblock.py (tree-sitter tokens
+ * resolved against the clang index), so every type/symbol links to its docs.
+ */
+import type { Segment } from "./SourceBlock.astro";
+
+interface Props {
+  segments: Segment[];
+}
+
+const { segments } = Astro.props;
+---
+
+{
+  segments.map((seg) =>
+    seg.href ? (
+      <a class={`tok tok-${seg.cls} tok-link`} href={seg.href}>{seg.text}</a>
+    ) : (
+      <span class={`tok tok-${seg.cls}`}>{seg.text}</span>
+    )
+  )
+}

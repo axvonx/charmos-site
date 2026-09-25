@@ -446,3 +446,235 @@ starlight-toc a[href^="#variable-"] {
    ThemeSelect); Starlight's native <select> is no longer emitted, so the old
    `starlight-theme-select` tint rules that used to live here are gone with it.
    The custom picker carries its own scoped styles in the component. */
+
+/* ── Rustdoc-style API items (ApiSig / ApiMember / ApiNote) ──────────────────
+   Each reference item is a generated signature header, then its harvested
+   comment docs as prose, then field/variant rows. */
+.sl-markdown-content .api-code {
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: var(--sl-text-code, 0.9em);
+  background: none;
+  padding: 0;
+  border: 0;
+}
+.api-code .tok-keyword { color: var(--sl-color-accent-high); font-weight: 600; }
+.api-code .tok-type    { color: hsl(190, 60%, 60%); }
+.api-code .tok-ident   { color: var(--sl-color-white); }
+.api-code .tok-field   { color: hsl(210, 40%, 72%); }
+.api-code .tok-number  { color: hsl(28, 65%, 62%); }
+.api-code .tok-string  { color: hsl(95, 40%, 62%); }
+.api-code .tok-comment { color: var(--sl-color-gray-3); font-style: italic; }
+.api-code .tok-punct   { color: var(--sl-color-gray-2); }
+.api-code .tok-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted var(--sl-color-gray-4);
+}
+.api-code .tok-link:hover {
+  color: var(--sl-color-accent-high);
+  border-bottom-color: var(--sl-color-accent);
+}
+
+/* One box per item: the generated declaration as the header, then the item's
+   comment docs, tag notes and (for structs/unions/enums) members inside it. */
+.sl-markdown-content .api-item {
+  margin-block: 2.25rem 0.75rem !important;
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--sl-color-accent);
+  background: var(--sl-color-gray-6, rgba(255, 255, 255, 0.04));
+  border-radius: 0 0.4rem 0.4rem 0;
+  scroll-margin-top: 5rem;
+}
+.sl-markdown-content .api-item__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  margin: 0 !important;
+}
+.sl-markdown-content .api-item__sig {
+  flex: 1;
+  min-width: 0;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: none !important;
+  border: 0 !important;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+.sl-markdown-content pre.api-item__sig { white-space: pre; }
+.sl-markdown-content .api-item__body { margin: 0.5rem 0 0 !important; }
+.sl-markdown-content .api-item__body > :first-child { margin-top: 0 !important; }
+.sl-markdown-content .api-sig__aside {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  margin: 0 !important;
+  font-size: var(--sl-text-xs);
+  white-space: nowrap;
+}
+.sl-markdown-content .api-sig__meta { color: var(--sl-color-gray-3); }
+.sl-markdown-content .api-sig__src {
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+.sl-markdown-content .api-sig__src:hover { color: var(--sl-color-accent-high); }
+
+/* Struct/union/enum: the box collapses; "(N fields)" shows only while
+   collapsed. Starlight draws the chevron as summary::before — inside our flex
+   header that made it a flex item that pushed `struct` right of everything
+   below it, so it is moved into the box's left gutter instead: header text,
+   docs and members then share one left edge. */
+.sl-markdown-content details.api-decl { padding-left: 1.75rem; }
+.sl-markdown-content .api-decl__head {
+  position: relative;
+  cursor: pointer;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+.sl-markdown-content .api-decl__head::before {
+  position: absolute;
+  left: -1.45rem;
+  top: 0.1rem;
+  margin: 0 !important;
+  color: var(--sl-color-gray-3);
+}
+.sl-markdown-content details.api-decl[open] .api-decl__count { display: none; }
+.sl-markdown-content .api-decl__count { color: var(--sl-color-gray-3); }
+/* The struct's own comment, set apart from the member list below it. */
+.sl-markdown-content details.api-decl > .api-item__body > .api-doc,
+.sl-markdown-content details.api-decl > .api-item__body > .api-note {
+  margin-bottom: 0.6rem !important;
+}
+.sl-markdown-content details.api-decl > .api-item__body > .api-doc {
+  padding-bottom: 0.6rem;
+  border-bottom: 1px dashed var(--sl-color-gray-5);
+}
+
+.sl-markdown-content .api-member {
+  margin: 0 !important;
+  padding-block: 0.1rem;
+  scroll-margin-top: 5rem;
+}
+.sl-markdown-content .api-member__head { position: relative; margin: 0 !important; }
+.sl-markdown-content .api-member__sig { white-space: pre-wrap; }
+.sl-markdown-content .api-member__anchor {
+  position: absolute;
+  left: -1.4em;
+  color: var(--sl-color-gray-4);
+  text-decoration: none;
+  opacity: 0;
+}
+.sl-markdown-content .api-member:hover > .api-member__head > .api-member__anchor,
+.sl-markdown-content .api-member:target > .api-member__head > .api-member__anchor { opacity: 1; }
+.sl-markdown-content .api-member:target > .api-member__head .api-member__sig {
+  background: var(--sl-color-accent-low);
+}
+/* A member's comment: indented under it, muted. Nested members also sit here. */
+.sl-markdown-content .api-member__body { margin: 0 0 0.35rem 4ch !important; }
+.sl-markdown-content .api-member__body:empty { display: none; }
+.sl-markdown-content .api-member__body .api-doc { color: var(--sl-color-gray-3); }
+
+/* Harvested comments are monospace plain text with intentional layout (rows,
+   fraction bars, alignment), so they render as written: monospace, line breaks
+   and runs of spaces preserved. Markdown still applies inline and for lists. */
+.sl-markdown-content .api-doc {
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: var(--sl-text-code, 0.875em);
+  line-height: 1.55;
+  color: var(--sl-color-gray-2);
+}
+.sl-markdown-content .api-doc p { white-space: pre-wrap; margin-block: 0.5em !important; }
+.sl-markdown-content .api-doc > :first-child { margin-top: 0 !important; }
+.sl-markdown-content .api-doc > :last-child { margin-bottom: 0 !important; }
+.sl-markdown-content .api-doc code { font-size: inherit; }
+.sl-markdown-content .api-doc pre { margin-block: 0.5em !important; }
+
+/* Tag notes (TODO/FIX/…, per charmOS tagscan). Inward-facing kinds are quiet;
+   WARN and BUG are outward-facing and get the loud treatment. */
+.sl-markdown-content .api-note {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  margin-block: 0.4rem !important;
+  padding: 0.3rem 0.6rem;
+  font-size: var(--sl-text-sm);
+  border-radius: 0.3rem;
+  border: 1px dashed var(--sl-color-gray-5);
+  color: var(--sl-color-gray-2);
+}
+.sl-markdown-content .api-note__tag {
+  flex: none;
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: var(--sl-text-xs);
+  font-weight: 700;
+  text-decoration: none;
+  color: var(--sl-color-gray-3);
+}
+.sl-markdown-content .api-note__body { margin: 0 !important; }
+.sl-markdown-content .api-note__body > :first-child { margin-top: 0; }
+.sl-markdown-content .api-note--todo .api-note__tag { color: hsl(210, 60%, 65%); }
+.sl-markdown-content .api-note--perf .api-note__tag,
+.sl-markdown-content .api-note--hack .api-note__tag { color: hsl(40, 70%, 60%); }
+.sl-markdown-content .api-note--note .api-note__tag { color: hsl(180, 40%, 60%); }
+.sl-markdown-content .api-note--fix .api-note__tag { color: hsl(0, 60%, 65%); }
+.sl-markdown-content .api-note--warn,
+.sl-markdown-content .api-note--bug {
+  border-style: solid;
+  border-left-width: 3px;
+}
+.sl-markdown-content .api-note--warn { border-color: hsl(40, 80%, 55%); background: hsla(40, 80%, 55%, 0.08); }
+.sl-markdown-content .api-note--warn .api-note__tag { color: hsl(40, 80%, 60%); }
+.sl-markdown-content .api-note--bug { border-color: hsl(0, 70%, 55%); background: hsla(0, 70%, 55%, 0.08); }
+.sl-markdown-content .api-note--bug .api-note__tag { color: hsl(0, 70%, 65%); }
+
+/* Macro bodies stay available, collapsed, under their #define signature. */
+.sl-markdown-content details.api-expansion > summary {
+  font-size: var(--sl-text-xs);
+  color: var(--sl-color-gray-3);
+  cursor: pointer;
+}
+
+/* starlight-theme-obsidian draws every <details> with a rounded 5px pill in
+   details::before that recolors on hover. On API boxes that pill sat beside the
+   box's own left bar as a separate oblong; drop it and put the hover state on
+   the rectangle itself (brighter bar, lifted background). */
+.sl-markdown-content details.api-decl::before,
+.sl-markdown-content details.api-expansion::before {
+  display: none;
+}
+.sl-markdown-content details.api-decl {
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.sl-markdown-content details.api-decl:has(> summary:hover) {
+  border-left-color: var(--sl-color-accent-high);
+  background: color-mix(in srgb, var(--sl-color-gray-6, #222) 80%, var(--sl-color-gray-5));
+}
+.sl-markdown-content details.api-expansion {
+  border-left: 2px solid var(--sl-color-gray-5);
+  padding-left: 0.75rem;
+}
+.sl-markdown-content details.api-expansion:has(> summary:hover) {
+  border-left-color: var(--sl-color-accent);
+}
+
+/* Top-level members indent under the header by the same step nested members
+   use (.api-member__body), so depth reads the same at every level. */
+.sl-markdown-content details.api-decl > .api-item__body > .api-member {
+  margin-left: 4ch !important;
+}
+
+/* Group label: a short source comment heading a run of items ("Pressures",
+   "Current tick data"), shown above the run rather than as the first item's
+   docs. */
+.sl-markdown-content .api-group {
+  margin: 1.75rem 0 -1.5rem !important;
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: var(--sl-text-xs);
+  color: var(--sl-color-gray-3);
+  letter-spacing: 0.02em;
+}
+.sl-markdown-content .api-group::before { content: "// "; opacity: 0.6; }
+.sl-markdown-content .api-item__body > .api-group {
+  margin: 0.75rem 0 0.1rem 4ch !important;
+}
