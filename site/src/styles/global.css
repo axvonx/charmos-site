@@ -589,6 +589,11 @@ starlight-toc a[href^="#variable-"] {
 .sl-markdown-content .api-doc > :last-child { margin-bottom: 0 !important; }
 .sl-markdown-content .api-doc code { font-size: inherit; }
 .sl-markdown-content .api-doc pre { margin-block: 0.5em !important; }
+/* ```text fences in item docs are comment diagrams: at the prose line-height
+   box-drawing verticals (│) break into dashes between rows. */
+.sl-markdown-content .api-doc .expressive-code:has(pre[data-language="text"]) {
+  --ec-codeLineHt: 1.25;
+}
 
 /* Tag notes (TODO/FIX/…, per charmOS tagscan). Inward-facing kinds are quiet;
    WARN and BUG are outward-facing and get the loud treatment. */

@@ -679,6 +679,10 @@ def parse_c_types_and_functions(filename):
     typedefs = []
     globals_vars = []
     defines = []
+    # File-scope macro calls (`ct_strong_int(time_ns, …);`). What they declare
+    # only exists after preprocessing, so make_md asks the clang index which
+    # declarations sit on each call's line.
+    expansions = []
 
     # Track node ids we have already recorded so we don't double-count
     # struct/enum nodes that appear both as a top-level declaration and
@@ -839,6 +843,19 @@ def parse_c_types_and_functions(filename):
                 }
             )
 
+        elif node.type == "expression_statement":
+            call = node.named_children[0] if node.named_child_count == 1 else None
+            fn = call.child_by_field_name("function") if call and call.type == "call_expression" else None
+            line = node.start_point[0] + 1
+            if fn is not None and fn.type == "identifier" and line not in macro_lines:
+                expansions.append(
+                    {
+                        "macro": node_text(fn, code),
+                        "raw_text": re.sub(r"\s+", " ", node_text(call, code)).strip(),
+                        "line": line,
+                    }
+                )
+
         elif node.type == "preproc_def":
             # Simple #define NAME value
             name_node = node.child_by_field_name("name")
@@ -914,6 +931,7 @@ def parse_c_types_and_functions(filename):
             "globals": globals_vars,
         },
         "defines": defines,
+        "expansions": expansions,
     }
     # Attach the file's plain comments to the items above as their docs (see
     # doccomments.py): leading/trailing comments → item docs, tags → notes.

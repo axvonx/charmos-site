@@ -15,7 +15,17 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from docmodel import Composite, Enum, Field, Function, Macro, Module, Typedef, Variable
+from docmodel import (
+    Composite,
+    Enum,
+    Expansion,
+    Field,
+    Function,
+    Macro,
+    Module,
+    Typedef,
+    Variable,
+)
 
 SOURCE_REPO_URL = "https://github.com/axvonx/charmos/blob/main"
 BUG_URL_BASE = "https://github.com/axvonx/charmos/issues"
@@ -380,7 +390,25 @@ def build_type_doc_table(
                 continue
             doc_table.setdefault(name.lower(), doc_base + "#" + type_anchor("variable", name))
 
+        # Macro-generated declarations: the primary one is the item heading,
+        # the rest are member rows inside it (see render_expansion).
+        for e in c_parse.get("expansions", []):
+            exp = Expansion.from_dict(e)
+            if not exp.primary:
+                continue
+            for d in exp.declares:
+                if d is exp.primary:
+                    anchor = type_anchor(exp.heading_kind.replace(" ", "-"), d.name)
+                else:
+                    anchor = expansion_member_anchor(exp.name, d.name)
+                key = f"{d.kind} {d.name}" if d.kind in ("struct", "union", "enum") else d.name
+                doc_table.setdefault(key.lower(), doc_base + "#" + anchor)
+
     return doc_table
+
+
+def expansion_member_anchor(owner: str, name: str) -> str:
+    return f"decl-{owner}-{name}".lower()
 
 
 def generate_github_link_safe(file_path: str, line: int | None = None) -> str:
@@ -406,8 +434,79 @@ def load_json_dir(json_dir: Path):
             data = json.load(f)
             ideas = data.get("ideas", [])
             all_ideas.extend(ideas)
-            c_parse_map[data.get("file")] = data.get("c_parse", {})
+            c_parse_map[data.get("file")] = attach_expansion_decls(data)
     return all_ideas, c_parse_map
+
+
+# ── macro-generated declarations ──────────────────────────────────────────────
+#
+# tree-sitter sees `ct_strong_int(time_ns, …);` as a call; only the preprocessor
+# knows it declares `time_ns_t`. The clang index records such declarations at the
+# call's line, so each recorded call (make_json "expansions") is joined with the
+# index symbols on its line.
+
+_DECLS_BY_LINE: dict | None = None
+_DECL_ORDER = {k: i for i, k in enumerate(("typedef", "struct", "union", "enum", "function", "variable", "enum_constant"))}
+
+
+def _decls_by_line() -> dict:
+    global _DECLS_BY_LINE
+    if _DECLS_BY_LINE is None:
+        _DECLS_BY_LINE = defaultdict(list)
+        if CLANG_INDEX_PATH.exists():
+            try:
+                index = json.loads(CLANG_INDEX_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                index = {"symbols": {}}
+            for sym in index["symbols"].values():
+                if sym.get("kind") in _DECL_ORDER:
+                    _DECLS_BY_LINE[(sym["file"], sym["line"])].append(sym)
+    return _DECLS_BY_LINE
+
+
+def _documented_names(c_parse: dict) -> set:
+    types = c_parse.get("types", {})
+    items = [*types.get("structs", []), *types.get("enums", []), *types.get("typedefs", []),
+             *types.get("globals", []), *c_parse.get("functions", []), *c_parse.get("defines", [])]
+    names = {i.get("name") for i in items}
+    names |= {m.get("name") for e in types.get("enums", []) for m in e.get("members", [])}
+    return names
+
+
+def _sort_value(sym) -> int:
+    try:
+        return int(sym.get("detail") or 0)
+    except ValueError:
+        return 0
+
+
+def attach_expansion_decls(data: dict) -> dict:
+    """Fill each macro call's ``declares`` from the clang index (idempotent) and
+    return the file's c_parse. Calls that declare nothing new (static asserts,
+    attribute macros) keep an empty list and are not rendered."""
+    c_parse = data.get("c_parse", {})
+    try:
+        rel = Path(data.get("file", "")).relative_to("charmos").as_posix()
+    except ValueError:
+        return c_parse
+    known = _documented_names(c_parse)
+    by_line = _decls_by_line()
+    for exp in c_parse.get("expansions", []):
+        syms = [s for s in by_line.get((rel, exp["line"]), []) if s["name"] not in known]
+        # `typedef enum : base { … } name_t` names an anonymous enum by its
+        # typedef: one declaration to a reader, so fold the enum into it.
+        enums = {s["name"]: s for s in syms if s["kind"] == "enum"}
+        decls = []
+        for s in sorted(syms, key=lambda s: (_DECL_ORDER[s["kind"]], _sort_value(s))):
+            if s["kind"] == "enum" and any(t["kind"] == "typedef" and t["name"] == s["name"] for t in syms):
+                continue
+            detail = s.get("detail")
+            if s["kind"] == "typedef" and s["name"] in enums:
+                base = enums[s["name"]].get("detail")
+                detail = f"enum : {base}" if base else "enum"
+            decls.append({"name": s["name"], "kind": s["kind"], "detail": detail})
+        exp["declares"] = decls
+    return c_parse
 
 
 def link_functions_in_md(md_text: str, functions_map: dict):
@@ -1001,6 +1100,61 @@ def render_typedef(t: Typedef, file: str | None) -> str:
     return _item(code, t, file)
 
 
+def _declared_code(d) -> str:
+    """One macro-declared name as a C line, from clang's spelling of it —
+    normalised to how the source writes it (`bool`, `struct x *p`)."""
+    code = _declared_code_raw(d)
+    code = re.sub(r"\b_Bool\b", "bool", code)
+    return re.sub(r" \* (?=\w)", " *", code)
+
+
+def _declared_code_raw(d) -> str:
+    if d.kind == "typedef":
+        return f"typedef {d.detail or ''} {d.name}".replace("  ", " ")
+    if d.kind == "enum_constant":
+        return f"{d.name} = {_enum_literal(d.detail)}" if d.detail else d.name
+    if d.kind == "function" and d.detail:
+        return d.detail
+    if d.kind == "variable" and d.detail:
+        return f"{d.detail} {d.name}"
+    if d.kind in ("struct", "union", "enum"):
+        return f"{d.kind} {d.name}"
+    return d.name
+
+
+def _enum_literal(value: str) -> str:
+    # Small values read best in decimal; limits (UINT64_MAX…) in hex.
+    try:
+        n = int(value)
+    except ValueError:
+        return value
+    return hex(n) if n > 0xFFFF else str(n)
+
+
+def render_expansion(x: Expansion, file: str | None) -> str:
+    """A macro call as written, with what it declares as member rows — the call
+    is what the author wrote; the rows are what readers look up."""
+    rows = []
+    for d in x.declares:
+        if d is x.primary:
+            continue
+        id_ = expansion_member_anchor(x.name, d.name)
+        _PAGE_IDS.add(id_)
+        rows.append(_member(id_, _declared_code(d), "", d.name))
+    head_decl = _member(
+        expansion_member_anchor(x.name, x.name), _declared_code(x.primary), "", x.name
+    )
+    # The macro name stays linked (to its docs), so no def_name to unlink.
+    return api_decl(
+        x.raw_text,
+        None,
+        _plural(len(x.declares), "declaration"),
+        source_def_href(file, x.line),
+        None,
+        [_docs_block(x, file), head_decl, *rows],
+    )
+
+
 def is_phantom(item) -> bool:
     """Attribute macros misparsed as items: `struct x { … } cc_aligned(64);`
     parses as a function whose "return type" is the struct body, and a trailing
@@ -1485,14 +1639,24 @@ def generate_docs(json_dir: Path):
             # so the right-hand TOC shows clean names nested under each section
             # while the body shows only the code blocks.
             def emit_section(title, items, item_kind, render_one):
+                # Macro calls documented in this section interleave with the
+                # plain items in source order, so group labels stay in place.
+                if DOC_STYLE != "classic":
+                    expanded = [x for x in module.expansions if x.section == title]
+                    if expanded:
+                        items = sorted([*items, *expanded], key=lambda it: it.line or 0)
                 if not items:
                     return
                 lines.append(f"## {title}\n")
                 for it in items:
                     if DOC_STYLE != "classic" and (label := group_label(it)):
                         lines.append(label + "\n")
-                    lines.append(f"### {item_kind(it)} {it.name}\n")
-                    lines.append(render_one(it))
+                    if isinstance(it, Expansion):
+                        lines.append(f"### {it.heading_kind} {it.name}\n")
+                        lines.append(render_expansion(it, module.file))
+                    else:
+                        lines.append(f"### {item_kind(it)} {it.name}\n")
+                        lines.append(render_one(it))
                     lines.append("\n")
 
             rustdoc = DOC_STYLE != "classic"
@@ -1537,6 +1701,7 @@ def generate_docs(json_dir: Path):
 
             return lines
 
+        attach_expansion_decls(data)
         module = Module.from_json(data)
         _PAGE_IDS.clear()
         if DOC_STYLE != "classic":

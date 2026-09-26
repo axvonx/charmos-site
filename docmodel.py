@@ -288,6 +288,79 @@ class Macro:
         )
 
 
+@dataclass
+class Declared:
+    """One declaration a macro call produced, as the clang index saw it."""
+
+    name: str = ""
+    kind: str = ""  # clang kind label: typedef, enum, enum_constant, function, …
+    detail: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Declared:
+        return cls(name=d.get("name") or "", kind=d.get("kind") or "", detail=d.get("detail"))
+
+
+# Primary kind of a macro call → (page section, item-heading kind). The first
+# kind the call declares, in this order, decides where it is documented.
+EXPANSION_SECTIONS = {
+    "typedef": ("Type Aliases", "type alias"),
+    "struct": ("Structs", "struct"),
+    "union": ("Unions", "union"),
+    "enum": ("Enums", "enum"),
+    "function": ("Functions", "function"),
+    "variable": ("Variables", "variable"),
+    "enum_constant": ("Enums", "enum"),
+}
+
+
+@dataclass
+class Expansion:
+    """A file-scope macro call (``ct_strong_int(time_ns, …);``) and the
+    declarations it expands to. It is documented under its *primary*
+    declaration — a typedef if it makes one — so ``name`` is that name."""
+
+    macro: str = ""
+    raw_text: str = ""
+    line: int | None = None
+    declares: list[Declared] = field(default_factory=list)
+    doc: str = ""
+    notes: list[Note] = field(default_factory=list)
+    group: str = ""
+
+    @property
+    def primary(self) -> Declared | None:
+        for kind in EXPANSION_SECTIONS:
+            for d in self.declares:
+                if d.kind == kind:
+                    return d
+        return None
+
+    @property
+    def name(self) -> str:
+        return self.primary.name if self.primary else ""
+
+    @property
+    def section(self) -> str:
+        return EXPANSION_SECTIONS[self.primary.kind][0] if self.primary else ""
+
+    @property
+    def heading_kind(self) -> str:
+        return EXPANSION_SECTIONS[self.primary.kind][1] if self.primary else ""
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Expansion:
+        return cls(
+            macro=d.get("macro") or "",
+            raw_text=d.get("raw_text") or "",
+            line=d.get("line"),
+            declares=[Declared.from_dict(x) for x in d.get("declares") or []],
+            doc=d.get("doc") or "",
+            notes=_notes(d),
+            group=d.get("group") or "",
+        )
+
+
 def _has_name(name: str) -> bool:
     """Rendered constructs must have a real name that isn't literally 'none'."""
     return bool(name) and name.lower() != "none"
@@ -307,6 +380,9 @@ class Module:
     functions: list[Function] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
     macros: list[Macro] = field(default_factory=list)
+    # Macro calls that declare something (only those make_md enriched with
+    # ``declares`` from the clang index).
+    expansions: list[Expansion] = field(default_factory=list)
     # Module-level docs (a leading comment before the first item) and tags
     # that sit in no item's comment — see doccomments.attach.
     doc: str = ""
@@ -339,6 +415,11 @@ class Module:
             # Macros are rendered unfiltered (append_defines_to_md applies no
             # name filter), so keep every define here.
             macros=[Macro.from_dict(m) for m in c_parse.get("defines", [])],
+            expansions=[
+                x
+                for x in (Expansion.from_dict(e) for e in c_parse.get("expansions", []))
+                if x.primary
+            ],
             doc=c_parse.get("module_doc") or "",
             notes=[Note.from_dict(n) for n in c_parse.get("module_notes") or []],
         )

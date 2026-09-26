@@ -32,7 +32,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import clang.cindex as cindex
-from clang.cindex import CursorKind, TranslationUnit
+from clang.cindex import CursorKind, TranslationUnit, TypeKind
 
 # ── libclang discovery ───────────────────────────────────────────────────────
 #
@@ -118,6 +118,10 @@ class Symbol:
     column: int
     end_line: int
     is_definition: bool
+    # What the declaration says beyond its name: a typedef's underlying type,
+    # an enum's integer type, an enum constant's value. Lets docs describe
+    # declarations that only exist after macro expansion.
+    detail: str | None = None
 
 
 @dataclasses.dataclass
@@ -247,6 +251,43 @@ def _walk(
         _walk_subtree(top, index, root)
 
 
+_UNSIGNED = {
+    TypeKind.BOOL, TypeKind.CHAR_U, TypeKind.UCHAR, TypeKind.CHAR16, TypeKind.CHAR32,
+    TypeKind.USHORT, TypeKind.UINT, TypeKind.ULONG, TypeKind.ULONGLONG, TypeKind.UINT128,
+}
+
+
+def _enum_value(node) -> int:
+    # cindex's enum_value only sees an unsigned base through a builtin type, so
+    # `enum : uint64_t` (a typedef) would read UINT64_MAX as -1.
+    base = node.semantic_parent.enum_type.get_canonical().kind
+    if base in _UNSIGNED:
+        return cindex.conf.lib.clang_getEnumConstantDeclUnsignedValue(node)
+    return cindex.conf.lib.clang_getEnumConstantDeclValue(node)
+
+
+def _detail(node) -> str | None:
+    """What a declaration says beyond its name (see Symbol.detail)."""
+    try:
+        kind = node.kind
+        if kind == CursorKind.TYPEDEF_DECL:
+            return node.underlying_typedef_type.spelling or None
+        if kind == CursorKind.ENUM_DECL:
+            return node.enum_type.spelling or None
+        if kind == CursorKind.ENUM_CONSTANT_DECL:
+            return str(_enum_value(node))
+        if kind == CursorKind.FUNCTION_DECL:
+            params = ", ".join(
+                f"{a.type.spelling} {a.spelling}".strip() for a in node.get_arguments()
+            )
+            return f"{node.result_type.spelling} {node.spelling}({params or 'void'})"
+        if kind == CursorKind.VAR_DECL:
+            return node.type.spelling or None
+    except Exception:  # libclang raises on malformed/recovered declarations
+        return None
+    return None
+
+
 def _walk_subtree(cursor, index: SymbolIndex, root: Path | None) -> None:
     for node in cursor.walk_preorder():
         kind = node.kind
@@ -288,6 +329,7 @@ def _walk_subtree(cursor, index: SymbolIndex, root: Path | None) -> None:
                     column=loc.column,
                     end_line=extent_end.line if extent_end is not None else loc.line,
                     is_definition=bool(node.is_definition()),
+                    detail=_detail(node),
                 )
             )
         elif kind in _REF_KINDS:

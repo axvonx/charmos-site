@@ -7,7 +7,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import make_md
-from docmodel import Composite, Enum, Function
+import pytest
+
+from docmodel import Composite, Enum, Function, Module
 from make_md import (
     _dir_name_to_slug,
     assemble_page_text,
@@ -537,3 +539,59 @@ class TestDirNameToSlug:
 
     def test_special_chars(self):
         assert _dir_name_to_slug("I/O & Memory") == "i-o-memory"
+
+
+class TestExpansions:
+    """Macro calls joined with the clang declarations on their line."""
+
+    SYMS = [
+        {"name": "time_ns_t", "kind": "enum", "detail": "uint64_t"},
+        {"name": "TIME_NS_MAX", "kind": "enum_constant", "detail": str(2**64 - 1)},
+        {"name": "TIME_NS_ZERO", "kind": "enum_constant", "detail": "0"},
+        {"name": "time_ns_t", "kind": "typedef", "detail": "enum time_ns_t"},
+    ]
+
+    @pytest.fixture
+    def data(self, monkeypatch):
+        by_line = {("include/types.h", 3): [dict(s, file="include/types.h", line=3) for s in self.SYMS]}
+        monkeypatch.setattr(make_md, "_DECLS_BY_LINE", by_line)
+        return {
+            "file": "charmos/include/types.h",
+            "c_parse": {
+                "expansions": [
+                    {"macro": "ct_strong_int", "raw_text": "ct_strong_int(time_ns, TIME_NS, uint64_t, UINT64_MAX)", "line": 3},
+                    {"macro": "static_assert", "raw_text": "static_assert(1)", "line": 9},
+                ]
+            },
+        }
+
+    def test_declares_from_index(self, data):
+        c_parse = make_md.attach_expansion_decls(data)
+        exp, assertion = c_parse["expansions"]
+        # The anonymous enum folds into its typedef; constants in value order.
+        assert exp["declares"] == [
+            {"name": "time_ns_t", "kind": "typedef", "detail": "enum : uint64_t"},
+            {"name": "TIME_NS_ZERO", "kind": "enum_constant", "detail": "0"},
+            {"name": "TIME_NS_MAX", "kind": "enum_constant", "detail": str(2**64 - 1)},
+        ]
+        assert assertion["declares"] == []
+
+    def test_module_keeps_only_declaring_calls(self, data):
+        make_md.attach_expansion_decls(data)
+        module = Module.from_json(data)
+        assert [x.name for x in module.expansions] == ["time_ns_t"]
+        assert module.expansions[0].section == "Type Aliases"
+
+    def test_names_link_to_the_page(self, data):
+        make_md.attach_expansion_decls(data)
+        table = make_md.build_type_doc_table({data["file"]: data["c_parse"]}, make_md.DOCS_ROOT)
+        assert table["time_ns_t"].endswith("/types/#type-alias-time_ns_t")
+        assert table["time_ns_max"].endswith("/types/#decl-time_ns_t-time_ns_max")
+
+    def test_render(self, data):
+        make_md.attach_expansion_decls(data)
+        out = make_md.render_expansion(Module.from_json(data).expansions[0], data["file"])
+        assert out.startswith("<ApiDecl")
+        assert '"count"' not in out and 'count="3 declarations"' in out
+        assert 'id="decl-time_ns_t-time_ns_max"' in out
+        assert "0xffffffffffffffff" in out

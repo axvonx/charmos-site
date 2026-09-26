@@ -183,16 +183,29 @@ def _is_code(lines: list[str]) -> bool:
 
 def _fence_diagrams(md: str) -> str:
     out = []
+    diagram: list[str] = []  # consecutive diagram paragraphs, fenced as one
+
+    def flush():
+        if diagram:
+            # Dedent the whole diagram at once so its paragraphs stay aligned.
+            out.append("```text\n" + textwrap.dedent("\n\n".join(diagram)) + "\n```")
+            diagram.clear()
+
     for para in re.split(r"\n\s*\n", md):
         lines = para.split("\n")
+        is_diagram = "```" not in para and bool(_DIAGRAM_RE.search(para))
+        # A one-line paragraph only counts when it continues a diagram.
+        if is_diagram and (len(lines) > 1 or diagram):
+            diagram.append(para)
+            continue
+        flush()
         if "```" in para:
             out.append(para)
-        elif _DIAGRAM_RE.search(para) and len(lines) > 1:
-            out.append("```text\n" + textwrap.dedent(para) + "\n```")
         elif _is_code(lines):
             out.append("```c\n" + textwrap.dedent(para) + "\n```")
         else:
             out.append(para)
+    flush()
     return "\n\n".join(out)
 
 
@@ -342,8 +355,9 @@ def item_targets(type_info: dict) -> list[tuple[int, dict]]:
             add(t)
     for f in type_info.get("functions", []):
         add(f)
-    for d in type_info.get("defines", []):
-        add(d)
+    for key in ("defines", "expansions"):
+        for d in type_info.get(key, []):
+            add(d)
     return targets
 
 

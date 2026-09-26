@@ -896,3 +896,26 @@ extern struct info hpet_base;
         assert names == {"__skernel", "hpet_base"}
         assert "__packed" not in names
         assert [s["name"] for s in result["types"]["structs"]] == ["packed_thing"]
+
+
+# ── File-scope macro calls ───────────────────────────────────────────────────
+
+
+class TestExpansions:
+    def test_file_scope_macro_call_recorded(self):
+        result = parse_code(
+            "/* Time units */\n"
+            "ct_strong_int(time_ns, TIME_NS, uint64_t, UINT64_MAX);\n"
+            "ct_strong_int(time_us,\n    TIME_US, uint64_t, UINT64_MAX);\n"
+        )
+        exps = result["expansions"]
+        assert [e["macro"] for e in exps] == ["ct_strong_int", "ct_strong_int"]
+        assert exps[0]["line"] == 2
+        assert exps[1]["raw_text"] == "ct_strong_int(time_us, TIME_US, uint64_t, UINT64_MAX)"
+        # A comment heading the run labels it; it is not the module doc.
+        assert exps[0]["group"] == "Time units"
+        assert result["module_doc"] == ""
+
+    def test_calls_inside_functions_ignored(self):
+        result = parse_code("void f(void) { do_thing(1); }\n")
+        assert result["expansions"] == []

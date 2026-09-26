@@ -128,3 +128,31 @@ class TestSerialization:
         loaded = json.loads(out.read_text())
         assert loaded["symbols"]
         assert loaded == idx.to_dict()
+
+
+# ── macro-generated declarations ─────────────────────────────────────────────
+
+
+class TestMacroGenerated:
+    """Declarations a macro call expands to sit on the call's line, with a
+    ``detail`` so docs can describe them without the source spelling them out."""
+
+    @pytest.fixture(scope="class")
+    def syms(self):
+        idx = index_files(
+            [str(FIXTURES / "strong.c")], args=["-std=c23"], root=str(FIXTURES)
+        )
+        return {(s.kind, s.name): s for s in idx.symbols.values()}
+
+    def test_declared_on_the_call_line(self, syms):
+        assert syms[("typedef", "time_ns_t")].line == 16
+        assert syms[("enum_constant", "TIME_NS_MAX")].line == 16
+        assert syms[("function", "thing_get")].line == 17
+
+    def test_unsigned_enum_value_through_typedef_base(self, syms):
+        # The base is a typedef of an unsigned type: must not read as -1.
+        assert syms[("enum_constant", "TIME_NS_MAX")].detail == str(2**64 - 1)
+        assert syms[("enum", "time_ns_t")].detail == "u64"
+
+    def test_function_detail_is_a_signature(self, syms):
+        assert syms[("function", "thing_get")].detail == "bool thing_get(struct thing * obj)"
