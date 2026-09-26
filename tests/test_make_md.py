@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for make_md.py — JSON-to-MDX documentation compilation."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -595,3 +596,34 @@ class TestExpansions:
         assert '"count"' not in out and 'count="3 declarations"' in out
         assert 'id="decl-time_ns_t-time_ns_max"' in out
         assert "0xffffffffffffffff" in out
+
+
+class TestMemberLinks:
+    def test_field_name_is_not_linked_but_its_type_is(self, monkeypatch, tmp_path):
+        index = {
+            "symbols": {
+                "s": {"name": "thread", "kind": "struct", "file": "t.h", "line": 1, "is_definition": True},
+                "v": {"name": "ops", "kind": "variable", "file": "x.c", "line": 9, "is_definition": True},
+            },
+            "by_name": {"thread": ["s"], "ops": ["v"]},
+        }
+        path = tmp_path / "index.json"
+        path.write_text(json.dumps(index))
+        monkeypatch.setattr(make_md, "CLANG_INDEX_PATH", path)
+        make_md._install_resolver({})
+        try:
+            # `ops` is also a global elsewhere; the field must not link to it.
+            row = make_md._member("f", "struct thread *ops", "", "ops")
+            # Same name as its type: the type stays linked, the field doesn't.
+            same = make_md._member("g", "struct thread *thread", "", "thread")
+        finally:
+            make_md._SEGMENTER = make_md._RESOLVE = None
+        assert row.count('"href"') == 1 and '"text": "ops", "cls": "ident"}' in row
+        assert same.count('"href"') == 1 and '"text": "thread", "cls": "ident"}' in same
+
+    def test_enum_variants_link_to_their_rows(self):
+        table = make_md.build_type_doc_table(
+            {"charmos/include/mem/a.h": {"types": {"enums": [{"name": "seg", "members": [{"name": "SEG_MAX"}]}]}}},
+            make_md.DOCS_ROOT,
+        )
+        assert table["seg_max"].endswith("#variant-seg-seg_max")

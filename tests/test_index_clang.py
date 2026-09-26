@@ -156,3 +156,9 @@ class TestMacroGenerated:
 
     def test_function_detail_is_a_signature(self, syms):
         assert syms[("function", "thing_get")].detail == "bool thing_get(struct thing * obj)"
+
+
+def test_strip_host_flags():
+    from index_clang import _strip_host_flags
+
+    assert _strip_host_flags(["-DX", "-arch", "arm64", "-Iinc"]) == ["-DX", "-Iinc"]

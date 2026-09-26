@@ -396,6 +396,20 @@ def _index_one_tu(job):
     return list(local.symbols.values()), local.references
 
 
+def _strip_host_flags(args: list[str]) -> list[str]:
+    """Drop flags a macOS host toolchain injects (``-arch arm64``): clang
+    rejects them for the kernel's cross target, failing every TU's parse."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == "-arch":
+            skip = True
+        else:
+            out.append(a)
+    return out
+
+
 def index_compile_commands(
     build_dir: str | os.PathLike,
     root: str | os.PathLike | None = None,
@@ -418,7 +432,7 @@ def index_compile_commands(
         # flags (-I, -D, -std, -ffreestanding, …).
         raw = list(cmd.arguments or [])[1:]
         src = cmd.filename
-        args = [a for a in raw if Path(a).name != Path(src).name]
+        args = _strip_host_flags([a for a in raw if Path(a).name != Path(src).name])
         job_list.append((src, args, cmd.directory or ".", root_str))
 
     workers = jobs or (os.cpu_count() or 4)

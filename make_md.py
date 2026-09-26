@@ -358,6 +358,11 @@ def build_type_doc_table(
             if not name:
                 continue
             doc_table[f"enum {name}".lower()] = doc_base + "#" + type_anchor("enum", name)
+            # Variants link to their row in the enum (render_enum's member id).
+            for m in e.get("members", []):
+                if m.get("name"):
+                    anchor = f"variant-{name}-{m['name']}".lower()
+                    doc_table.setdefault(m["name"].lower(), doc_base + "#" + anchor)
 
         for t in types.get("typedefs", []):
             name = t.get("name")
@@ -833,9 +838,9 @@ _SIG_WRAP = 70  # wrap parameter lists past this width (≈ the content column i
 _MACRO_INLINE_MAX = 60  # object-like macro values up to this length stay in the signature
 
 
-def _segments_json(code: str, def_name: str | None = None) -> str:
+def _segments_json(code: str, def_name: str | None = None, last: bool = False) -> str:
     if _SEGMENTER is not None:
-        segs = _SEGMENTER(code, def_name)
+        segs = _SEGMENTER(code, def_name, last)
     else:
         import sourceblock
 
@@ -859,12 +864,16 @@ def api_sig(code: str, name: str | None, src: str | None, meta: str | None = Non
 _PAGE_IDS: set[str] = set()
 
 
-def _member_id(prefix: str, owner: str, name: str) -> str:
-    # The declarator's own identifier: `(*const fn)(…)` → fn, `buf[N]` → buf,
-    # `*p` → p.
+def _declarator_ident(name: str) -> str:
+    """The declarator's own identifier: `(*const fn)(…)` → fn, `buf[N]` → buf,
+    `*p` → p."""
     bare = re.sub(r"\b(const|volatile|restrict)\b", " ", name)  # `*const *p` → p
     m = re.search(r"\(\s*\*\s*(\w+)", bare) or re.search(r"\w+", bare)
-    base = f"{prefix}-{owner}-{m.group(1 if m.re.groups else 0) if m else name}".lower()
+    return m.group(1 if m.re.groups else 0) if m else name
+
+
+def _member_id(prefix: str, owner: str, name: str) -> str:
+    base = f"{prefix}-{owner}-{_declarator_ident(name)}".lower()
     id_, n = base, 2
     while id_ in _PAGE_IDS:
         id_, n = f"{base}-{n}", n + 1
@@ -1002,7 +1011,8 @@ def group_label(item) -> str:
 
 
 def _member(id_: str, code: str, body: str, name: str | None = None) -> str:
-    seg = _segments_json(code, name)
+    # A member row declares its name last (`struct thread *thread`).
+    seg = _segments_json(code, name, last=True)
     inner = f"\n\n{body}\n\n" if body else ""
     return f'<ApiMember id="{id_}" segments={{{seg}}}>{inner}</ApiMember>'
 
@@ -1049,7 +1059,10 @@ def _field_rows(members, owner: str, file: str | None) -> list[str]:
             rows.append(_member(id_, head, "\n\n".join(x for x in (docs, *inner) if x)))
         else:
             bit = f" : {m.bitfield}" if m.bitfield else ""
-            rows.append(_member(id_, f"{(m.type or '').strip()} {name}{bit}", docs))
+            # The field's own name is its definition, not a reference: left
+            # unlinked, or a same-named global elsewhere would claim it.
+            code = f"{(m.type or '').strip()} {name}{bit}"
+            rows.append(_member(id_, code, docs, _declarator_ident(name) if name else None))
     return rows
 
 
@@ -1461,9 +1474,9 @@ def _install_resolver(doc_table):
         return
     resolve = sourceblock.index_resolver(index, lambda sym: symbol_target(sym, doc_table))
 
-    def segment(code, def_name=None):
+    def segment(code, def_name=None, last=False):
         segs = sourceblock.render(code, resolve)
-        for seg in segs:
+        for seg in reversed(segs) if last else segs:
             if def_name and seg.text == def_name and seg.cls in ("ident", "type", "field"):
                 seg.href = seg.symbol = None
                 seg.cls = "ident"

@@ -329,9 +329,36 @@ def build_clang_index():
         return False
 
     index = index_clang.index_compile_commands(CCDB_DIR, root=CLONE_DIR)
+    orphans = _index_orphan_headers(index_clang, index)
     index.save(CLANG_INDEX)
-    end_step(t0, f"{len(index.symbols)} symbols, {len(index.references)} refs")
+    extra = f", +{orphans} header(s) no compiled TU includes" if orphans else ""
+    end_step(t0, f"{len(index.symbols)} symbols, {len(index.references)} refs{extra}")
     return True
+
+
+def _index_orphan_headers(index_clang, index):
+    """Index headers the real TUs never reach, each as its own TU (see
+    _orphan_header_entries), so their symbols link and their macro-generated
+    declarations are documented. Returns how many headers were added."""
+    import json
+
+    # A header a compiled TU reached holds a definition or a reference. (Not
+    # definitions alone: a header of prototypes has its symbols recorded at
+    # their definitions in .c files.)
+    covered = {sym.file for sym in index.symbols.values()}
+    covered |= {ref.file for ref in index.references}
+    entries = _orphan_header_entries(
+        json.loads((CCDB_DIR / "compile_commands.json").read_text()),
+        CLONE_DIR.resolve(),
+        lambda rel: rel in covered,
+    )
+    if not entries:
+        return 0
+    orphan_db = CCDB_DIR / "index_orphans"
+    orphan_db.mkdir(parents=True, exist_ok=True)
+    (orphan_db / "compile_commands.json").write_text(json.dumps(entries, indent=1))
+    index_clang.index_compile_commands(orphan_db, root=CLONE_DIR, index=index)
+    return len(entries)
 
 
 def _resolve_tool(name):
@@ -364,13 +391,16 @@ def _localize_woboq_logos():
             html_path.write_text(new, encoding="utf-8")
 
 
-def _orphan_header_entries(entries, src_root, out_dir):
-    """compile_commands entries for documented headers Woboq didn't render.
+def _orphan_header_entries(entries, src_root, covered):
+    """compile_commands entries for documented headers no compiled TU reaches.
 
-    Woboq only emits a page for a file some compiled TU reaches, so a header no
-    .c includes (e.g. mem/arena.h) gets no page — yet the docs link every
-    header in SOURCE_DIRS. Each orphan becomes its own TU, borrowing the flags
-    of a real kernel TU so its includes resolve.
+    Woboq and the clang index only see files some compiled TU includes, so a
+    header no .c includes (e.g. mem/arena.h) gets no source page and no indexed
+    symbols — yet the docs cover every header in SOURCE_DIRS. Each orphan (a
+    header for which ``covered(rel_path)`` is false) becomes its own TU,
+    borrowing the flags of a real kernel TU so its includes resolve. One TU per
+    header, not one TU including them all: a header that doesn't build alone
+    then costs only itself.
     """
     template = next((e for e in entries if e.get("file", "").endswith(".c")), None)
     if template is None:
@@ -383,7 +413,7 @@ def _orphan_header_entries(entries, src_root, out_dir):
     for dir_name in SOURCE_DIRS:
         for header in sorted((src_root / dir_name).rglob("*.h")):
             rel = header.relative_to(src_root).as_posix()
-            if (out_dir / SOURCE_BROWSER_PROJECT / f"{rel}.html").exists():
+            if covered(rel):
                 continue
             argv = [str(header) if a == src else a for a in args]
             if str(header) not in argv:
@@ -398,13 +428,13 @@ def _render_orphan_headers(gen, ccjson, src_root):
     pages (and appends their refs). Returns how many headers were queued."""
     import json
 
+    pages = SOURCE_BROWSER_OUT.resolve() / SOURCE_BROWSER_PROJECT
     entries = _orphan_header_entries(
-        json.loads(ccjson.read_text()), src_root, SOURCE_BROWSER_OUT.resolve()
+        json.loads(ccjson.read_text()), src_root, lambda rel: (pages / f"{rel}.html").exists()
     )
     if not entries:
         return 0
-    # A separate db dir: the main compile_commands.json also feeds the clang
-    # index, which must stay limited to real TUs.
+    # A separate db dir: the main compile_commands.json is the real build's.
     orphan_db = CCDB_DIR / "woboq_orphans"
     orphan_db.mkdir(parents=True, exist_ok=True)
     (orphan_db / "compile_commands.json").write_text(json.dumps(entries, indent=1))
